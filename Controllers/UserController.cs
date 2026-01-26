@@ -10,6 +10,7 @@ namespace wenu.Controllers
     public class UserController : ControllerBase
     {
         [HttpGet("hello")]
+        [Authorize(Roles = "ADMIN,USER")]
         public IActionResult HelloWorld()
         {
             // Get the username from the JWT token claims

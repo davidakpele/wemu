@@ -8,6 +8,6 @@ namespace wenu.Services
     {
         Task<UserResponseDto> RegisterAsync(UsersDTO request);
 
-        Task<AuthResponseDTO> LoginAsync(LoginRequestDTO request);
+        Task<ApiResponse<AuthResponseDTO>> LoginAsync(LoginRequestDTO request);
     }
 }

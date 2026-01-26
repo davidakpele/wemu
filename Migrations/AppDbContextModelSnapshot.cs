@@ -48,7 +48,7 @@ namespace wenu.Migrations
                         .IsUnique()
                         .HasDatabaseName("RoleNameIndex");
 
-                    b.ToTable("AspNetRoles", (string)null);
+                    b.ToTable("Roles", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<int>", b =>
@@ -72,7 +72,7 @@ namespace wenu.Migrations
 
                     b.HasIndex("RoleId");
 
-                    b.ToTable("AspNetRoleClaims", (string)null);
+                    b.ToTable("RoleClaims", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<int>", b =>
@@ -96,7 +96,7 @@ namespace wenu.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.ToTable("AspNetUserClaims", (string)null);
+                    b.ToTable("UserClaims", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<int>", b =>
@@ -117,7 +117,7 @@ namespace wenu.Migrations
 
                     b.HasIndex("UserId");
 
-                    b.ToTable("AspNetUserLogins", (string)null);
+                    b.ToTable("UserLogins", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<int>", b =>
@@ -132,7 +132,7 @@ namespace wenu.Migrations
 
                     b.HasIndex("RoleId");
 
-                    b.ToTable("AspNetUserRoles", (string)null);
+                    b.ToTable("UserRoles", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<int>", b =>
@@ -151,7 +151,249 @@ namespace wenu.Migrations
 
                     b.HasKey("UserId", "LoginProvider", "Name");
 
-                    b.ToTable("AspNetUserTokens", (string)null);
+                    b.ToTable("UserTokens", (string)null);
+                });
+
+            modelBuilder.Entity("wenu.Entities.BlockedParticipant", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("BlockedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("BlockedByUserId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("BlockedUserId")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("LiveStreamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BlockedByUserId");
+
+                    b.HasIndex("BlockedUserId");
+
+                    b.HasIndex("LiveStreamId", "BlockedUserId");
+
+                    b.ToTable("BlockedParticipant");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStream", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime?>("EndedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("HostUserId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsAudioEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsVideoEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StreamKey")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("StreamUrl")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("ViewerCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("HostUserId");
+
+                    b.HasIndex("IsActive");
+
+                    b.HasIndex("StartedAt");
+
+                    b.ToTable("LiveStreams");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStreamCoHost", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("CanEnableVideo")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("CanRemoveParticipants")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("CanSpeak")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ConnectionId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("InvitedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("LiveStreamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("RemovedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IsActive");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("LiveStreamId", "UserId");
+
+                    b.ToTable("LiveStreamCoHost");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStreamMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsSystemMessage")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("LiveStreamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<DateTime>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Type")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LiveStreamId");
+
+                    b.HasIndex("SentAt");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("LiveStreamMessage");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStreamParticipant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ConnectionId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsCurrentlyWatching")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("JoinedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LeftAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("LiveStreamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IsCurrentlyWatching");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("LiveStreamId", "UserId");
+
+                    b.ToTable("LiveStreamParticipant");
+                });
+
+            modelBuilder.Entity("wenu.Entities.Message", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Content")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsRead")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("ParticipantId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SenderId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ParticipantId");
+
+                    b.HasIndex("SenderId");
+
+                    b.ToTable("Messages");
                 });
 
             modelBuilder.Entity("wenu.Entities.UserRecord", b =>
@@ -203,6 +445,10 @@ namespace wenu.Migrations
 
                     b.Property<int>("AccessFailedCount")
                         .HasColumnType("integer");
+
+                    b.Property<string>("Bio")
+                        .IsRequired()
+                        .HasColumnType("text");
 
                     b.Property<string>("ConcurrencyStamp")
                         .IsConcurrencyToken()
@@ -257,6 +503,10 @@ namespace wenu.Migrations
                     b.Property<bool>("PhoneNumberConfirmed")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("ProfilePictureUrl")
+                        .IsRequired()
+                        .HasColumnType("text");
+
                     b.Property<string>("SecurityStamp")
                         .HasColumnType("text");
 
@@ -269,6 +519,9 @@ namespace wenu.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Email")
+                        .IsUnique();
+
                     b.HasIndex("NormalizedEmail")
                         .HasDatabaseName("EmailIndex");
 
@@ -276,7 +529,10 @@ namespace wenu.Migrations
                         .IsUnique()
                         .HasDatabaseName("UserNameIndex");
 
-                    b.ToTable("AspNetUsers", (string)null);
+                    b.HasIndex("UserName")
+                        .IsUnique();
+
+                    b.ToTable("Users", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<int>", b =>
@@ -330,6 +586,120 @@ namespace wenu.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("wenu.Entities.BlockedParticipant", b =>
+                {
+                    b.HasOne("wenu.Entities.Users", "BlockedByUser")
+                        .WithMany()
+                        .HasForeignKey("BlockedByUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("wenu.Entities.Users", "BlockedUser")
+                        .WithMany()
+                        .HasForeignKey("BlockedUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("wenu.Entities.LiveStream", "LiveStream")
+                        .WithMany("BlockedParticipants")
+                        .HasForeignKey("LiveStreamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("BlockedByUser");
+
+                    b.Navigation("BlockedUser");
+
+                    b.Navigation("LiveStream");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStream", b =>
+                {
+                    b.HasOne("wenu.Entities.Users", "HostUser")
+                        .WithMany("HostedStreams")
+                        .HasForeignKey("HostUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("HostUser");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStreamCoHost", b =>
+                {
+                    b.HasOne("wenu.Entities.LiveStream", "LiveStream")
+                        .WithMany("CoHosts")
+                        .HasForeignKey("LiveStreamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("wenu.Entities.Users", "User")
+                        .WithMany("CoHostedStreams")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("LiveStream");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStreamMessage", b =>
+                {
+                    b.HasOne("wenu.Entities.LiveStream", "LiveStream")
+                        .WithMany("Messages")
+                        .HasForeignKey("LiveStreamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("wenu.Entities.Users", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("LiveStream");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("wenu.Entities.LiveStreamParticipant", b =>
+                {
+                    b.HasOne("wenu.Entities.LiveStream", "LiveStream")
+                        .WithMany("Participants")
+                        .HasForeignKey("LiveStreamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("wenu.Entities.Users", "User")
+                        .WithMany("ParticipatedStreams")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("LiveStream");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("wenu.Entities.Message", b =>
+                {
+                    b.HasOne("wenu.Entities.Users", "Participant")
+                        .WithMany()
+                        .HasForeignKey("ParticipantId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("wenu.Entities.Users", "Sender")
+                        .WithMany()
+                        .HasForeignKey("SenderId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Participant");
+
+                    b.Navigation("Sender");
+                });
+
             modelBuilder.Entity("wenu.Entities.UserRecord", b =>
                 {
                     b.HasOne("wenu.Entities.Users", "User")
@@ -341,8 +711,25 @@ namespace wenu.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("wenu.Entities.LiveStream", b =>
+                {
+                    b.Navigation("BlockedParticipants");
+
+                    b.Navigation("CoHosts");
+
+                    b.Navigation("Messages");
+
+                    b.Navigation("Participants");
+                });
+
             modelBuilder.Entity("wenu.Entities.Users", b =>
                 {
+                    b.Navigation("CoHostedStreams");
+
+                    b.Navigation("HostedStreams");
+
+                    b.Navigation("ParticipatedStreams");
+
                     b.Navigation("UserRecord");
                 });
 #pragma warning restore 612, 618

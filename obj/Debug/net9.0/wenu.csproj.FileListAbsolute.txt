@@ -143,4 +143,11 @@ E:\Projects\wenu\bin\Debug\net9.0\zh-Hant\Microsoft.CodeAnalysis.Workspaces.MSBu
 E:\Projects\wenu\bin\Debug\net9.0\Npgsql.dll
 E:\Projects\wenu\bin\Debug\net9.0\Npgsql.EntityFrameworkCore.PostgreSQL.dll
 E:\Projects\wenu\obj\Debug\net9.0\wenu.sourcelink.json
-E:\Projects\wenu\obj\Debug\net9.0\staticwebassets.upToDateCheck.txt
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.AspNetCore.Cryptography.Internal.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.AspNetCore.Cryptography.KeyDerivation.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.Extensions.Caching.Memory.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.Extensions.Configuration.Abstractions.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.Extensions.DependencyInjection.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.Extensions.Identity.Core.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.Extensions.Identity.Stores.dll
+E:\Projects\wenu\bin\Debug\net9.0\Microsoft.Extensions.Logging.dll

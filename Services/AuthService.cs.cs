@@ -66,12 +66,15 @@ namespace wenu.Services
 
             return new UserResponseDto
             {
+                Id = user.Id,
+                FirstName = user.FirstName,
+                LastName = user.LastName,
                 Username = user.UserName,
                 Email = user.Email,
             };
         }
 
-        public async Task<AuthResponseDTO> LoginAsync(LoginRequestDTO request)
+        public async Task<ApiResponse<AuthResponseDTO>> LoginAsync(LoginRequestDTO request)
         {
             var user = await _userManager.FindByNameAsync(request.Username);
 
@@ -88,12 +91,18 @@ namespace wenu.Services
 
             var token = await _jwtService.GenerateToken(user);
 
-            return new AuthResponseDTO
+            return new ApiResponse<AuthResponseDTO>
             {
-                Token = token,
-                UserName = user.UserName!,
-                FirstName = user.FirstName,
-                LastName = user.LastName
+                Success = true,
+                Message = "Login successful",
+                Data = new AuthResponseDTO
+                {
+                    Id = user.Id,
+                    Token = token,
+                    UserName = user.UserName!,
+                    FirstName = user.FirstName,
+                    LastName = user.LastName
+                }
             };
         }
     }
