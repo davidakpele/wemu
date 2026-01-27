@@ -98,7 +98,7 @@
             },
             "Scalar.AspNetCore": {
               "target": "Package",
-              "version": "[2.12.14, )"
+              "version": "[2.12.18, )"
             },
             "StackExchange.Redis": {
               "target": "Package",

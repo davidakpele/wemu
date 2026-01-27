@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace wumo.Services
+namespace wenu.Services
 {
     public class AttackPatternDetector
     {

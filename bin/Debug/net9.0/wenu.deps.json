@@ -18,7 +18,7 @@
           "Microsoft.IdentityModel.JsonWebTokens": "8.15.0",
           "Microsoft.IdentityModel.Tokens": "8.15.0",
           "Npgsql.EntityFrameworkCore.PostgreSQL": "9.0.4",
-          "Scalar.AspNetCore": "2.12.14",
+          "Scalar.AspNetCore": "2.12.18",
           "StackExchange.Redis": "2.10.1",
           "System.IdentityModel.Tokens.Jwt": "8.15.0"
         },
@@ -724,11 +724,11 @@
           }
         }
       },
-      "Scalar.AspNetCore/2.12.14": {
+      "Scalar.AspNetCore/2.12.18": {
         "runtime": {
           "lib/net9.0/Scalar.AspNetCore.dll": {
-            "assemblyVersion": "2.12.14.0",
-            "fileVersion": "2.12.14.0"
+            "assemblyVersion": "2.12.18.0",
+            "fileVersion": "2.12.18.0"
           }
         }
       },
@@ -1157,12 +1157,12 @@
       "path": "pipelines.sockets.unofficial/2.2.8",
       "hashPath": "pipelines.sockets.unofficial.2.2.8.nupkg.sha512"
     },
-    "Scalar.AspNetCore/2.12.14": {
+    "Scalar.AspNetCore/2.12.18": {
       "type": "package",
       "serviceable": true,
-      "sha512": "sha512-VEGl5/zr5G/g/OYrYxBuYzt3/VCHnxzaOGZC3JoOV7i4quP0bbTrt4oDKCp+rqzjJqg6AkeWH5mJ/iMFysLwbQ==",
-      "path": "scalar.aspnetcore/2.12.14",
-      "hashPath": "scalar.aspnetcore.2.12.14.nupkg.sha512"
+      "sha512": "sha512-SVO8iTlSZPxAklOl8BROup3GLNknLseWKMgLweSG7xyuAydnNt76YmKQfrIiRXmw7mx0z3zCcd0ZRva+vkPn0w==",
+      "path": "scalar.aspnetcore/2.12.18",
+      "hashPath": "scalar.aspnetcore.2.12.18.nupkg.sha512"
     },
     "StackExchange.Redis/2.10.1": {
       "type": "package",

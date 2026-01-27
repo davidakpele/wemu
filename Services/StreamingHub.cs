@@ -2,633 +2,986 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace wenu.Services
 {
-    public class CallHub : Hub
+    public class StreamingHub : Hub
     {
-        private static readonly ConcurrentDictionary<string, CallRoom> _rooms = new();
-        private static readonly ConcurrentDictionary<string, UserConnection> _connections = new();
-        private static readonly ConcurrentDictionary<string, MediaStream> _streams = new();
-        private static readonly ConcurrentDictionary<string, StreamBuffer> _buffers = new();
-        private readonly ILogger<CallHub> _logger;
+        private static readonly ConcurrentDictionary<string, StreamRoom> _streamRooms = new();
+        private static readonly ConcurrentDictionary<string, StreamConnection> _streamConnections = new();
+        private readonly ILogger<StreamingHub> _logger;
 
-        public CallHub(ILogger<CallHub> logger)
+        public StreamingHub(ILogger<StreamingHub> logger)
         {
             _logger = logger;
         }
 
-        public async Task JoinCall(string roomId, string userId, string username)
+        public async Task StartStream(string username, int userId, string title, string description, string category, string visibility, string type)
         {
             var connectionId = Context.ConnectionId;
+            var roomId = GenerateRoomId();
 
-            if (!_rooms.ContainsKey(roomId))
+            var streamRoom = new StreamRoom
             {
-                _rooms[roomId] = new CallRoom 
-                { 
-                    RoomId = roomId, 
-                    Participants = new List<string>(),
-                    CreatedAt = DateTime.UtcNow,
-                    QualitySettings = new QualitySettings
+                RoomId = roomId,
+                Title = title,
+                Description = description,
+                Category = category,
+                Visibility = visibility,
+                State = "live",
+                StartTime = DateTime.UtcNow,
+                EndTime = null,
+                CurrentViewers = 0,
+                Host = new HostInfo
+                {
+                    Id = userId,
+                    Username = username,
+                    ConnectionId = connectionId,
+                    CoHosts = new List<CoHostInfo>()
+                },
+                Participants = new ParticipantsList
+                {
+                    UsersList = new List<ParticipantInfo>(),
+                    TotalMembers = 0
+                },
+                MediaSettings = new MediaSettings
+                {
+                    AudioEnabled = type == "video" || type == "audio",
+                    VideoEnabled = type == "video",
+                    ScreenShareEnabled = false,
+                    RecordingEnabled = false
+                },
+                Permissions = new StreamPermissions
+                {
+                    CanChat = true,
+                    CanRaiseHand = true,
+                    CanShareScreen = false
+                },
+                MessageRoom = new MessageRoom
+                {
+                    RoomId = roomId,
+                    ChatEnabled = true,
+                    MessageRetention = "live_only",
+                    Messages = new List<ChatMessage>(),
+                    Moderation = new ModerationInfo
                     {
-                        MaxBitrate = 2500,
-                        MinBitrate = 256,
-                        AdaptiveBitrate = true,
-                        BufferSizeMs = 2000,
-                        JitterBufferMs = 200
+                        MutedUsers = new List<string>(),
+                        DeletedMessages = new List<string>()
                     }
-                };
-            }
+                },
+                Realtime = new RealtimeInfo
+                {
+                    ReactionsEnabled = true,
+                    Events = new List<StreamEvent>()
+                }
+            };
 
-            var room = _rooms[roomId];
+            _streamRooms[roomId] = streamRoom;
 
-            var connection = new UserConnection
+            var hostConnection = new StreamConnection
             {
                 ConnectionId = connectionId,
                 UserId = userId,
                 Username = username,
                 RoomId = roomId,
-                JoinedAt = DateTime.UtcNow,
-                NetworkQuality = new NetworkQuality
-                {
-                    Bandwidth = 2000,
-                    Latency = 50,
-                    PacketLoss = 0,
-                    Jitter = 10
-                },
-                CurrentBitrate = room.QualitySettings.MaxBitrate
+                Role = "host",
+                JoinedAt = DateTime.UtcNow
             };
 
-            _connections[connectionId] = connection;
-            room.Participants.Add(connectionId);
+            _streamConnections[connectionId] = hostConnection;
+
             await Groups.AddToGroupAsync(connectionId, roomId);
 
-            // Initialize stream buffer for this connection
-            _buffers[connectionId] = new StreamBuffer
+            var response = new
             {
-                BufferSizeMs = room.QualitySettings.BufferSizeMs,
-                JitterBufferMs = room.QualitySettings.JitterBufferMs
-            };
-
-            // Start quality monitoring for this connection
-            _ = MonitorConnectionQuality(connectionId, roomId);
-
-            var existingParticipants = room.Participants
-                .Where(p => p != connectionId && _connections.ContainsKey(p))
-                .Select(p => new
+                data = new
                 {
-                    connectionId = p,
-                    userId = _connections[p].UserId,
-                    username = _connections[p].Username,
-                    quality = _connections[p].NetworkQuality,
-                    streams = _streams.Values.Where(s => s.OwnerConnectionId == p).Select(s => new
+                    stream = new
                     {
-                        streamId = s.StreamId,
-                        type = s.Type,
-                        bitrate = s.CurrentBitrate,
-                        hasRedundancy = s.RedundantPaths.Any()
-                    })
-                })
-                .ToList();
-
-            await Clients.Caller.SendAsync("ExistingParticipants", new
-            {
-                participants = existingParticipants,
-                roomSettings = room.QualitySettings,
-                bufferSettings = new
-                {
-                    bufferSizeMs = room.QualitySettings.BufferSizeMs,
-                    jitterBufferMs = room.QualitySettings.JitterBufferMs
+                        roomid = streamRoom.RoomId,
+                        title = streamRoom.Title,
+                        description = streamRoom.Description,
+                        category = streamRoom.Category,
+                        visibility = streamRoom.Visibility
+                    },
+                    status = new
+                    {
+                        state = streamRoom.State,
+                        start_time = streamRoom.StartTime,
+                        end_time = streamRoom.EndTime,
+                        current_viewers = streamRoom.CurrentViewers
+                    },
+                    userdetails = new
+                    {
+                        username = username,
+                        id = userId,
+                        role = "host"
+                    },
+                    host = new
+                    {
+                        id = streamRoom.Host.Id,
+                        username = streamRoom.Host.Username,
+                        coHosts = streamRoom.Host.CoHosts
+                    },
+                    participants = new
+                    {
+                        users_list = streamRoom.Participants.UsersList,
+                        total_members = streamRoom.Participants.TotalMembers
+                    },
+                    media_settings = streamRoom.MediaSettings,
+                    permissions = streamRoom.Permissions,
+                    message_room = streamRoom.MessageRoom,
+                    realtime = streamRoom.Realtime
                 }
-            });
-
-            await Clients.OthersInGroup(roomId).SendAsync("UserJoined", new 
-            { 
-                connectionId, 
-                userId, 
-                username,
-                quality = connection.NetworkQuality
-            });
-
-            _logger.LogInformation("User {UserId} joined room {RoomId} with {ParticipantCount} participants", 
-                userId, roomId, room.Participants.Count);
-        }
-
-        public async Task PublishStream(string streamId, string type, int initialBitrate)
-        {
-            var connectionId = Context.ConnectionId;
-            if (!_connections.TryGetValue(connectionId, out var connection))
-                return;
-
-            var stream = new MediaStream
-            {
-                StreamId = streamId,
-                OwnerConnectionId = connectionId,
-                OwnerUserId = connection.UserId,
-                Type = type,
-                CurrentBitrate = initialBitrate,
-                TargetBitrate = initialBitrate,
-                IsActive = true,
-                CreatedAt = DateTime.UtcNow,
-                LastPacketTime = DateTime.UtcNow,
-                RedundantPaths = new List<RedundantPath>(),
-                Subscribers = new List<string>()
             };
 
-            _streams[streamId] = stream;
+            await Clients.Caller.SendAsync("StreamStarted", response);
 
-            if (_rooms.TryGetValue(connection.RoomId, out var room))
+            _logger.LogInformation("User {Username} started stream {RoomId}", username, roomId);
+        }
+
+        public async Task JoinStream(string roomId, int userId, string username)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
             {
-                // Create redundant path for reliability
-                var redundantPath = new RedundantPath
-                {
-                    PathId = $"{streamId}_redundant_1",
-                    IsActive = true,
-                    Priority = 1,
-                    LastUsedAt = DateTime.UtcNow
-                };
-                stream.RedundantPaths.Add(redundantPath);
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
 
-                await Clients.OthersInGroup(connection.RoomId).SendAsync("NewStreamAvailable", new
+            var participant = new ParticipantInfo
+            {
+                Id = userId.ToString(),
+                Username = username,
+                Role = "viewer",
+                ConnectionId = connectionId
+            };
+
+            room.Participants.UsersList.Add(participant);
+            room.Participants.TotalMembers = room.Participants.UsersList.Count;
+            room.CurrentViewers++;
+
+            var connection = new StreamConnection
+            {
+                ConnectionId = connectionId,
+                UserId = userId,
+                Username = username,
+                RoomId = roomId,
+                Role = "viewer",
+                JoinedAt = DateTime.UtcNow
+            };
+
+            _streamConnections[connectionId] = connection;
+
+            await Groups.AddToGroupAsync(connectionId, roomId);
+
+            if (room.Host != null)
+            {
+                await Clients.Client(room.Host.ConnectionId).SendAsync("ParticipantJoined", new
                 {
-                    streamId,
-                    ownerConnectionId = connectionId,
-                    ownerUserId = connection.UserId,
-                    type,
-                    bitrate = initialBitrate,
-                    redundantPaths = stream.RedundantPaths.Select(p => p.PathId)
+                    userId = userId.ToString(),
+                    username = username,
+                    roomId = roomId
                 });
 
-                // Start stream health monitoring
-                _ = MonitorStreamHealth(streamId, connection.RoomId);
-            }
-
-            _logger.LogInformation("Stream {StreamId} published by user {UserId} with bitrate {Bitrate}kbps", 
-                streamId, connection.UserId, initialBitrate);
-        }
-
-        public async Task SubscribeToStream(string streamId)
-        {
-            var connectionId = Context.ConnectionId;
-            if (!_connections.TryGetValue(connectionId, out var connection))
-                return;
-
-            if (!_streams.TryGetValue(streamId, out var stream))
-                return;
-
-            if (!stream.Subscribers.Contains(connectionId))
-            {
-                stream.Subscribers.Add(connectionId);
-
-                // Adjust bitrate based on subscriber's network quality
-                var optimalBitrate = CalculateOptimalBitrate(connection.NetworkQuality);
-                
-                await Clients.Caller.SendAsync("StreamSubscribed", new
+                foreach (var coHost in room.Host.CoHosts)
                 {
-                    streamId,
-                    ownerConnectionId = stream.OwnerConnectionId,
-                    recommendedBitrate = optimalBitrate,
-                    bufferSizeMs = _buffers.TryGetValue(connectionId, out var buffer) ? buffer.BufferSizeMs : 2000,
-                    redundantPaths = stream.RedundantPaths.Where(p => p.IsActive).Select(p => p.PathId)
-                });
-
-                _logger.LogInformation("User {UserId} subscribed to stream {StreamId} with bitrate {Bitrate}kbps", 
-                    connection.UserId, streamId, optimalBitrate);
-            }
-        }
-
-        public async Task UnsubscribeFromStream(string streamId)
-        {
-            var connectionId = Context.ConnectionId;
-            if (_streams.TryGetValue(streamId, out var stream))
-            {
-                stream.Subscribers.Remove(connectionId);
-                await Clients.Caller.SendAsync("StreamUnsubscribed", new { streamId });
-            }
-        }
-
-        public async Task UpdateNetworkStats(int bandwidth, int latency, int packetLoss, int jitter)
-        {
-            var connectionId = Context.ConnectionId;
-            if (!_connections.TryGetValue(connectionId, out var connection))
-                return;
-
-            connection.NetworkQuality.Bandwidth = bandwidth;
-            connection.NetworkQuality.Latency = latency;
-            connection.NetworkQuality.PacketLoss = packetLoss;
-            connection.NetworkQuality.Jitter = jitter;
-            connection.NetworkQuality.LastUpdated = DateTime.UtcNow;
-
-            // Adjust bitrate for all streams this user is subscribed to
-            var subscribedStreams = _streams.Values.Where(s => s.Subscribers.Contains(connectionId));
-            foreach (var stream in subscribedStreams)
-            {
-                var newBitrate = CalculateOptimalBitrate(connection.NetworkQuality);
-                if (Math.Abs(connection.CurrentBitrate - newBitrate) > 200)
-                {
-                    connection.CurrentBitrate = newBitrate;
-                    await Clients.Caller.SendAsync("BitrateAdjusted", new
+                    await Clients.Client(coHost.ConnectionId).SendAsync("ParticipantJoined", new
                     {
-                        streamId = stream.StreamId,
-                        newBitrate,
-                        reason = "network_condition_change"
+                        userId = userId.ToString(),
+                        username = username,
+                        roomId = roomId
                     });
                 }
             }
 
-            // Check if quality is degraded and needs redundant path switch
-            if (packetLoss > 5 || latency > 200)
+            var joinMessage = new ChatMessage
             {
-                await HandleDegradedConnection(connectionId);
-            }
-        }
-
-        public async Task ReportStreamHealth(string streamId, int packetLoss, int jitter, long lastPacketTimestamp)
-        {
-            if (!_streams.TryGetValue(streamId, out var stream))
-                return;
-
-            stream.PacketLoss = packetLoss;
-            stream.Jitter = jitter;
-            stream.LastPacketTime = DateTime.UtcNow;
-
-            // If stream health is poor, trigger recovery
-            if (packetLoss > 10 || jitter > 100)
-            {
-                await RecoverStream(streamId);
-            }
-        }
-
-        public async Task RequestRedundantPath(string streamId)
-        {
-            var connectionId = Context.ConnectionId;
-            if (!_connections.TryGetValue(connectionId, out var connection))
-                return;
-
-            if (!_streams.TryGetValue(streamId, out var stream))
-                return;
-
-            // Find or create an available redundant path
-            var redundantPath = stream.RedundantPaths.FirstOrDefault(p => p.IsActive) 
-                ?? new RedundantPath
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
                 {
-                    PathId = $"{streamId}_redundant_{stream.RedundantPaths.Count + 1}",
-                    IsActive = true,
-                    Priority = stream.RedundantPaths.Count + 1,
-                    LastUsedAt = DateTime.UtcNow
-                };
+                    Id = userId.ToString(),
+                    Username = username,
+                    Role = "viewer"
+                },
+                Type = "system",
+                Content = $"{username} just joined the room",
+                Timestamp = DateTime.UtcNow
+            };
 
-            if (!stream.RedundantPaths.Contains(redundantPath))
-            {
-                stream.RedundantPaths.Add(redundantPath);
-            }
+            room.MessageRoom.Messages.Add(joinMessage);
 
-            await Clients.Caller.SendAsync("RedundantPathReady", new
+            // Send updated participant list to ALL users in the room
+            var updatedParticipantsList = room.Participants.UsersList.Select(p => new
             {
-                streamId,
-                pathId = redundantPath.PathId,
-                priority = redundantPath.Priority
+                username = p.Username,
+                id = p.Id,
+                role = p.Role
+            }).ToList();
+
+            await Clients.Group(roomId).SendAsync("UserJoinedStream", new
+            {
+                username = username,
+                userId = userId,
+                message = $"{username} just joined the room",
+                current_viewers = room.CurrentViewers,
+                total_members = room.Participants.TotalMembers,
+                participants = updatedParticipantsList
             });
 
-            _logger.LogInformation("Redundant path {PathId} provided for stream {StreamId} to user {UserId}", 
-                redundantPath.PathId, streamId, connection.UserId);
-        }
-
-        public async Task SwitchToRedundantPath(string streamId, string pathId)
-        {
-            var connectionId = Context.ConnectionId;
-            if (!_streams.TryGetValue(streamId, out var stream))
-                return;
-
-            var path = stream.RedundantPaths.FirstOrDefault(p => p.PathId == pathId);
-            if (path != null)
+            var streamData = new
             {
-                path.LastUsedAt = DateTime.UtcNow;
-                await Clients.Caller.SendAsync("RedundantPathActivated", new { streamId, pathId });
-                
-                _logger.LogInformation("Switched to redundant path {PathId} for stream {StreamId}", pathId, streamId);
-            }
-        }
-
-        public async Task AdjustBuffer(int bufferSizeMs)
-        {
-            var connectionId = Context.ConnectionId;
-            if (_buffers.TryGetValue(connectionId, out var buffer))
-            {
-                buffer.BufferSizeMs = Math.Clamp(bufferSizeMs, 500, 5000);
-                await Clients.Caller.SendAsync("BufferAdjusted", new { bufferSizeMs = buffer.BufferSizeMs });
-            }
-        }
-
-        public async Task SendOffer(string targetConnectionId, object offer, string mediaType)
-        {
-            await Clients.Client(targetConnectionId).SendAsync("ReceiveOffer", new 
-            { 
-                senderConnectionId = Context.ConnectionId, 
-                offer, 
-                mediaType 
-            });
-        }
-
-        public async Task SendAnswer(string targetConnectionId, object answer, string mediaType)
-        {
-            await Clients.Client(targetConnectionId).SendAsync("ReceiveAnswer", new 
-            { 
-                senderConnectionId = Context.ConnectionId, 
-                answer, 
-                mediaType 
-            });
-        }
-
-        public async Task SendIceCandidate(string targetConnectionId, object candidate)
-        {
-            await Clients.Client(targetConnectionId).SendAsync("ReceiveIceCandidate", new 
-            { 
-                senderConnectionId = Context.ConnectionId, 
-                candidate 
-            });
-        }
-
-        public async Task ToggleMedia(string mediaType, bool enabled)
-        {
-            var connectionId = Context.ConnectionId;
-            if (_connections.TryGetValue(connectionId, out var userConnection))
-            {
-                await Clients.OthersInGroup(userConnection.RoomId).SendAsync("MediaToggled", new 
-                { 
-                    connectionId, 
-                    mediaType, 
-                    enabled 
-                });
-            }
-        }
-
-        public async Task StartScreenShare()
-        {
-            var connectionId = Context.ConnectionId;
-            if (_connections.TryGetValue(connectionId, out var userConnection))
-            {
-                await Clients.OthersInGroup(userConnection.RoomId).SendAsync("ScreenShareStarted", new 
-                { 
-                    connectionId 
-                });
-            }
-        }
-
-        public async Task StopScreenShare()
-        {
-            var connectionId = Context.ConnectionId;
-            if (_connections.TryGetValue(connectionId, out var userConnection))
-            {
-                await Clients.OthersInGroup(userConnection.RoomId).SendAsync("ScreenShareStopped", new 
-                { 
-                    connectionId 
-                });
-            }
-        }
-
-        public async Task SendMessage(string message)
-        {
-            var connectionId = Context.ConnectionId;
-            if (_connections.TryGetValue(connectionId, out var userConnection))
-            {
-                await Clients.Group(userConnection.RoomId).SendAsync("ReceiveMessage", new
+                data = new
                 {
-                    userId = userConnection.UserId,
-                    username = userConnection.Username,
-                    message
-                });
-            }
-        }
-
-        public async Task LeaveCall()
-        {
-            var connectionId = Context.ConnectionId;
-            if (_connections.TryRemove(connectionId, out var userConnection))
-            {
-                var roomId = userConnection.RoomId;
-
-                // Clean up streams owned by this user
-                var ownedStreams = _streams.Values.Where(s => s.OwnerConnectionId == connectionId).ToList();
-                foreach (var stream in ownedStreams)
-                {
-                    stream.IsActive = false;
-                    _streams.TryRemove(stream.StreamId, out _);
-                }
-
-                // Remove from subscriptions
-                foreach (var stream in _streams.Values)
-                {
-                    stream.Subscribers.Remove(connectionId);
-                }
-
-                // Clean up buffer
-                _buffers.TryRemove(connectionId, out _);
-
-                if (_rooms.TryGetValue(roomId, out var room))
-                {
-                    room.Participants.Remove(connectionId);
-                    if (room.Participants.Count == 0)
+                    stream = new
                     {
-                        _rooms.TryRemove(roomId, out _);
-                    }
+                        roomid = room.RoomId,
+                        title = room.Title,
+                        description = room.Description,
+                        category = room.Category,
+                        visibility = room.Visibility
+                    },
+                    status = new
+                    {
+                        state = room.State,
+                        start_time = room.StartTime,
+                        end_time = room.EndTime,
+                        current_viewers = room.CurrentViewers
+                    },
+                    userdetails = new
+                    {
+                        username = username,
+                        id = userId,
+                        role = "viewer"
+                    },
+                    host = new
+                    {
+                        id = room.Host.Id,
+                        username = room.Host.Username,
+                        coHosts = room.Host.CoHosts
+                    },
+                    participants = new
+                    {
+                        users_list = updatedParticipantsList,
+                        total_members = room.Participants.TotalMembers
+                    },
+                    media_settings = room.MediaSettings,
+                    permissions = room.Permissions,
+                    message_room = room.MessageRoom,
+                    realtime = room.Realtime
                 }
+            };
 
-                await Clients.OthersInGroup(roomId).SendAsync("UserLeft", new 
-                { 
-                    connectionId, 
-                    userId = userConnection.UserId 
-                });
+            await Clients.Caller.SendAsync("JoinedStream", streamData);
 
-                await Groups.RemoveFromGroupAsync(connectionId, roomId);
+            _logger.LogInformation("User {Username} joined stream {RoomId}", username, roomId);
+        }
 
-                _logger.LogInformation("User {UserId} left room {RoomId}", userConnection.UserId, roomId);
+        public async Task InviteCoHost(string roomId, string targetUsername, int targetUserId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var hostConnection) || hostConnection.Role != "host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host can invite co-hosts" });
+                return;
             }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var targetParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Username == targetUsername);
+            if (targetParticipant == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "User not found in stream" });
+                return;
+            }
+
+            await Clients.Client(targetParticipant.ConnectionId).SendAsync("CoHostInvite", new
+            {
+                roomId = roomId,
+                hostUsername = hostConnection.Username,
+                message = $"{hostConnection.Username} invited you to be a co-host"
+            });
+
+            _logger.LogInformation("Host {Host} invited {User} to be co-host in room {RoomId}", 
+                hostConnection.Username, targetUsername, roomId);
+        }
+
+        public async Task AcceptCoHostInvite(string roomId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var participant = room.Participants.UsersList.FirstOrDefault(p => p.ConnectionId == connectionId);
+            if (participant == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Participant not found" });
+                return;
+            }
+
+            participant.Role = "co-host";
+            connection.Role = "co-host";
+
+            var coHost = new CoHostInfo
+            {
+                Username = connection.Username,
+                Id = connection.UserId.ToString(),
+                ConnectionId = connectionId
+            };
+
+            room.Host.CoHosts.Add(coHost);
+
+            var message = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = connection.UserId.ToString(),
+                    Username = connection.Username,
+                    Role = "co-host"
+                },
+                Type = "system",
+                Content = $"{connection.Username} is now invited to co-host",
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(message);
+
+            await Clients.Group(roomId).SendAsync("CoHostAdded", new
+            {
+                username = connection.Username,
+                userId = connection.UserId,
+                message = $"{connection.Username} is now invited to co-host",
+                coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
+            });
+
+            _logger.LogInformation("User {Username} accepted co-host invite in room {RoomId}", 
+                connection.Username, roomId);
+        }
+
+        public async Task RejectCoHostInvite(string roomId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            await Clients.Caller.SendAsync("CoHostInviteRejected", new { roomId });
+
+            _logger.LogInformation("User {Username} rejected co-host invite in room {RoomId}", 
+                connection.Username, roomId);
+        }
+
+        public async Task RemoveCoHost(string roomId, string targetUsername, int targetUserId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var hostConnection) || hostConnection.Role != "host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host can remove co-hosts" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var coHost = room.Host.CoHosts.FirstOrDefault(c => c.Username == targetUsername);
+            if (coHost == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Co-host not found" });
+                return;
+            }
+
+            room.Host.CoHosts.Remove(coHost);
+
+            var participant = room.Participants.UsersList.FirstOrDefault(p => p.Username == targetUsername);
+            if (participant != null)
+            {
+                participant.Role = "viewer";
+            }
+
+            var targetConnection = _streamConnections.Values.FirstOrDefault(c => c.Username == targetUsername && c.RoomId == roomId);
+            if (targetConnection != null)
+            {
+                targetConnection.Role = "viewer";
+            }
+
+            var message = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = targetUserId.ToString(),
+                    Username = targetUsername,
+                    Role = "viewer"
+                },
+                Type = "system",
+                Content = $"{targetUsername} is no longer a co-host",
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(message);
+
+            await Clients.Group(roomId).SendAsync("CoHostRemoved", new
+            {
+                username = targetUsername,
+                userId = targetUserId,
+                message = $"{targetUsername} is no longer a co-host",
+                coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
+            });
+
+            _logger.LogInformation("Host {Host} removed {User} from co-host in room {RoomId}", 
+                hostConnection.Username, targetUsername, roomId);
+        }
+
+        public async Task LeaveCoHost(string roomId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection) || connection.Role != "co-host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "You are not a co-host" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var coHost = room.Host.CoHosts.FirstOrDefault(c => c.Username == connection.Username);
+            if (coHost != null)
+            {
+                room.Host.CoHosts.Remove(coHost);
+            }
+
+            var participant = room.Participants.UsersList.FirstOrDefault(p => p.ConnectionId == connectionId);
+            if (participant != null)
+            {
+                participant.Role = "viewer";
+            }
+
+            connection.Role = "viewer";
+
+            var message = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = connection.UserId.ToString(),
+                    Username = connection.Username,
+                    Role = "viewer"
+                },
+                Type = "system",
+                Content = $"{connection.Username} left co-host and returned to participant",
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(message);
+
+            await Clients.Group(roomId).SendAsync("CoHostLeft", new
+            {
+                username = connection.Username,
+                userId = connection.UserId,
+                message = $"{connection.Username} left co-host and returned to participant",
+                coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
+            });
+
+            _logger.LogInformation("User {Username} left co-host role in room {RoomId}", 
+                connection.Username, roomId);
+        }
+
+        public async Task LeaveStream(string roomId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryRemove(connectionId, out var connection))
+                return;
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+                return;
+
+            var participant = room.Participants.UsersList.FirstOrDefault(p => p.ConnectionId == connectionId);
+            if (participant != null)
+            {
+                room.Participants.UsersList.Remove(participant);
+                room.Participants.TotalMembers = room.Participants.UsersList.Count;
+                room.CurrentViewers--;
+            }
+
+            var coHost = room.Host.CoHosts.FirstOrDefault(c => c.ConnectionId == connectionId);
+            if (coHost != null)
+            {
+                room.Host.CoHosts.Remove(coHost);
+            }
+
+            await Groups.RemoveFromGroupAsync(connectionId, roomId);
+
+            var leaveMessage = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = connection.UserId.ToString(),
+                    Username = connection.Username,
+                    Role = connection.Role
+                },
+                Type = "system",
+                Content = $"{connection.Username} left the room",
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(leaveMessage);
+
+            // Send updated participant list to ALL remaining users in the room
+            var updatedParticipantsList = room.Participants.UsersList.Select(p => new
+            {
+                username = p.Username,
+                id = p.Id,
+                role = p.Role
+            }).ToList();
+
+            await Clients.Group(roomId).SendAsync("UserLeftStream", new
+            {
+                username = connection.Username,
+                userId = connection.UserId,
+                message = $"{connection.Username} left the room",
+                current_viewers = room.CurrentViewers,
+                total_members = room.Participants.TotalMembers,
+                participants = updatedParticipantsList
+            });
+
+            _logger.LogInformation("User {Username} left stream {RoomId}", connection.Username, roomId);
+        }
+
+        public async Task EndStream(string roomId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection) || connection.Role != "host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host can end the stream" });
+                return;
+            }
+
+            if (!_streamRooms.TryRemove(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            room.State = "ended";
+            room.EndTime = DateTime.UtcNow;
+
+            await Clients.Group(roomId).SendAsync("StreamEnded", new
+            {
+                roomId = roomId,
+                message = $"{connection.Username} has ended the stream",
+                endTime = room.EndTime
+            });
+
+            var participantConnections = _streamConnections.Values
+                .Where(c => c.RoomId == roomId)
+                .ToList();
+
+            foreach (var participant in participantConnections)
+            {
+                _streamConnections.TryRemove(participant.ConnectionId, out _);
+                await Groups.RemoveFromGroupAsync(participant.ConnectionId, roomId);
+            }
+
+            _logger.LogInformation("Host {Username} ended stream {RoomId}", connection.Username, roomId);
+        }
+
+        public async Task SendStreamMessage(string roomId, string message)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+                return;
+
+            var chatMessage = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = connection.UserId.ToString(),
+                    Username = connection.Username,
+                    Role = connection.Role
+                },
+                Type = "text",
+                Content = message,
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(chatMessage);
+
+            await Clients.Group(roomId).SendAsync("ReceiveStreamMessage", new
+            {
+                message_id = chatMessage.MessageId,
+                sender = chatMessage.Sender,
+                type = chatMessage.Type,
+                content = chatMessage.Content,
+                timestamp = chatMessage.Timestamp
+            });
+        }
+
+        public async Task ToggleStreamMedia(string roomId, string mediaType, bool enabled)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            if (connection.Role != "host" && connection.Role != "co-host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host or co-host can toggle media" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+                return;
+
+            switch (mediaType.ToLower())
+            {
+                case "audio":
+                    room.MediaSettings.AudioEnabled = enabled;
+                    break;
+                case "video":
+                    room.MediaSettings.VideoEnabled = enabled;
+                    break;
+                case "screenshare":
+                    room.MediaSettings.ScreenShareEnabled = enabled;
+                    break;
+            }
+
+            await Clients.Group(roomId).SendAsync("MediaToggled", new
+            {
+                username = connection.Username,
+                mediaType = mediaType,
+                enabled = enabled
+            });
         }
 
         public override async Task OnDisconnectedAsync(Exception? exception)
         {
-            await LeaveCall();
+            var connectionId = Context.ConnectionId;
+
+            if (_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                if (connection.Role == "host")
+                {
+                    await EndStream(connection.RoomId);
+                }
+                else
+                {
+                    await LeaveStream(connection.RoomId);
+                }
+            }
+
             await base.OnDisconnectedAsync(exception);
         }
 
-        private async Task MonitorConnectionQuality(string connectionId, string roomId)
+        private string GenerateRoomId()
         {
-            while (_connections.ContainsKey(connectionId))
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            var random = new Random();
+            return new string(Enumerable.Repeat(chars, 20)
+                .Select(s => s[random.Next(s.Length)]).ToArray());
+        }
+    
+        public async Task SendOffer(string roomId, string toUserId, RTCSessionDescriptionInit offer)
+        {
+            try
             {
-                await Task.Delay(5000);
-
-                if (!_connections.TryGetValue(connectionId, out var connection))
-                    break;
-
-                if (DateTime.UtcNow - connection.NetworkQuality.LastUpdated > TimeSpan.FromSeconds(15))
+                if (!_streamRooms.TryGetValue(roomId, out var room))
                 {
-                    await Clients.Client(connectionId).SendAsync("RequestNetworkStats");
+                    await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                    return;
                 }
+
+                var targetParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Id == toUserId);
+                if (targetParticipant == null)
+                {
+                    await Clients.Caller.SendAsync("Error", new { message = "Target user not found" });
+                    return;
+                }
+
+                await Clients.Client(targetParticipant.ConnectionId).SendAsync("ReceiveOffer", new
+                {
+                    fromUserId = Context.UserIdentifier,
+                    offer = offer,
+                    roomId = roomId
+                });
+
+                _logger.LogInformation("Offer sent from {From} to {To} in room {RoomId}", 
+                    Context.UserIdentifier, toUserId, roomId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error sending offer");
+                await Clients.Caller.SendAsync("Error", new { message = "Failed to send offer" });
             }
         }
 
-        private async Task MonitorStreamHealth(string streamId, string roomId)
+        public async Task SendAnswer(string roomId, string toUserId, RTCSessionDescriptionInit answer)
         {
-            while (_streams.ContainsKey(streamId))
+            try
             {
-                await Task.Delay(3000);
-
-                if (!_streams.TryGetValue(streamId, out var stream))
-                    break;
-
-                if (!stream.IsActive)
-                    break;
-
-                var timeSinceLastPacket = DateTime.UtcNow - stream.LastPacketTime;
-                if (timeSinceLastPacket.TotalSeconds > 5)
+                if (!_streamRooms.TryGetValue(roomId, out var room))
                 {
-                    await RecoverStream(streamId);
+                    await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                    return;
                 }
+
+                var targetParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Id == toUserId);
+                if (targetParticipant == null)
+                {
+                    await Clients.Caller.SendAsync("Error", new { message = "Target user not found" });
+                    return;
+                }
+
+                await Clients.Client(targetParticipant.ConnectionId).SendAsync("ReceiveAnswer", new
+                {
+                    fromUserId = Context.UserIdentifier,
+                    answer = answer
+                });
+
+                _logger.LogInformation("Answer sent from {From} to {To} in room {RoomId}", 
+                    Context.UserIdentifier, toUserId, roomId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error sending answer");
+                await Clients.Caller.SendAsync("Error", new { message = "Failed to send answer" });
             }
         }
 
-        private async Task HandleDegradedConnection(string connectionId)
+        public async Task SendICECandidate(string roomId, string toUserId, RTCIceCandidateInit candidate)
         {
-            if (!_connections.TryGetValue(connectionId, out var connection))
-                return;
-
-            var subscribedStreams = _streams.Values.Where(s => s.Subscribers.Contains(connectionId));
-            
-            foreach (var stream in subscribedStreams)
+            try
             {
-                var redundantPath = stream.RedundantPaths.FirstOrDefault(p => p.IsActive);
-                if (redundantPath != null)
+                if (!_streamRooms.TryGetValue(roomId, out var room))
                 {
-                    await Clients.Client(connectionId).SendAsync("SwitchToRedundantPath", new
+                    await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                    return;
+                }
+
+                var targetParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Id == toUserId);
+                if (targetParticipant == null)
+                {
+                    await Clients.Caller.SendAsync("Error", new { message = "Target user not found" });
+                    return;
+                }
+
+                await Clients.Client(targetParticipant.ConnectionId).SendAsync("ReceiveICECandidate", new
+                {
+                    fromUserId = Context.UserIdentifier,
+                    candidate = candidate
+                });
+
+                _logger.LogDebug("ICE candidate sent from {From} to {To} in room {RoomId}", 
+                    Context.UserIdentifier, toUserId, roomId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error sending ICE candidate");
+                await Clients.Caller.SendAsync("Error", new { message = "Failed to send ICE candidate" });
+            }
+        }
+
+        public async Task NotifyParticipantJoined(string roomId, string userId, string username)
+        {
+            try
+            {
+                if (!_streamRooms.TryGetValue(roomId, out var room))
+                {
+                    await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                    return;
+                }
+                var hostAndCoHosts = new List<string> { room.Host.ConnectionId };
+                hostAndCoHosts.AddRange(room.Host.CoHosts.Select(c => c.ConnectionId));
+
+                foreach (var connectionId in hostAndCoHosts)
+                {
+                    await Clients.Client(connectionId).SendAsync("ParticipantJoined", new
                     {
-                        streamId = stream.StreamId,
-                        pathId = redundantPath.PathId,
-                        reason = "degraded_connection"
+                        userId = userId,
+                        username = username,
+                        roomId = roomId
                     });
                 }
+
+                _logger.LogInformation("Participant {Username} ({UserId}) joined room {RoomId} - notified host/co-hosts", 
+                    username, userId, roomId);
             }
-
-            _logger.LogWarning("Degraded connection detected for user {UserId}, switching to redundant paths", 
-                connection.UserId);
-        }
-
-        private async Task RecoverStream(string streamId)
-        {
-            if (!_streams.TryGetValue(streamId, out var stream))
-                return;
-
-            if (_rooms.TryGetValue(_connections[stream.OwnerConnectionId].RoomId, out var room))
+            catch (Exception ex)
             {
-                await Clients.Group(room.RoomId).SendAsync("StreamRecovering", new
-                {
-                    streamId,
-                    ownerConnectionId = stream.OwnerConnectionId
-                });
-
-                await Clients.Client(stream.OwnerConnectionId).SendAsync("RecoverStream", new
-                {
-                    streamId,
-                    reason = "packet_loss_or_timeout"
-                });
+                _logger.LogError(ex, "Error notifying participant joined");
+                await Clients.Caller.SendAsync("Error", new { message = "Failed to notify participant joined" });
             }
-
-            _logger.LogWarning("Stream recovery initiated for stream {StreamId}", streamId);
         }
 
-        private int CalculateOptimalBitrate(NetworkQuality quality)
-        {
-            var baseBitrate = 2000;
 
-            if (quality.Bandwidth < 500)
-                baseBitrate = 256;
-            else if (quality.Bandwidth < 1000)
-                baseBitrate = 512;
-            else if (quality.Bandwidth < 1500)
-                baseBitrate = 1000;
-            else if (quality.Bandwidth < 2000)
-                baseBitrate = 1500;
-
-            if (quality.PacketLoss > 5)
-                baseBitrate = (int)(baseBitrate * 0.7);
-
-            if (quality.Latency > 150)
-                baseBitrate = (int)(baseBitrate * 0.8);
-
-            return Math.Clamp(baseBitrate, 256, 2500);
-        }
     }
 
-    public class CallRoom
+    public class StreamRoom
     {
         public string RoomId { get; set; } = string.Empty;
-        public List<string> Participants { get; set; } = new();
-        public DateTime CreatedAt { get; set; }
-        public QualitySettings QualitySettings { get; set; } = new();
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public string Category { get; set; } = string.Empty;
+        public string Visibility { get; set; } = string.Empty;
+        public string State { get; set; } = string.Empty;
+        public DateTime StartTime { get; set; }
+        public DateTime? EndTime { get; set; }
+        public int CurrentViewers { get; set; }
+        public HostInfo Host { get; set; } = new();
+        public ParticipantsList Participants { get; set; } = new();
+        public MediaSettings MediaSettings { get; set; } = new();
+        public StreamPermissions Permissions { get; set; } = new();
+        public MessageRoom MessageRoom { get; set; } = new();
+        public RealtimeInfo Realtime { get; set; } = new();
     }
 
-    public class UserConnection
+    public class StreamConnection
     {
         public string ConnectionId { get; set; } = string.Empty;
-        public string UserId { get; set; } = string.Empty;
+        public int UserId { get; set; }
         public string Username { get; set; } = string.Empty;
         public string RoomId { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty;
         public DateTime JoinedAt { get; set; }
-        public NetworkQuality NetworkQuality { get; set; } = new();
-        public int CurrentBitrate { get; set; }
     }
 
-    public class MediaStream
+    public class HostInfo
     {
-        public string StreamId { get; set; } = string.Empty;
-        public string OwnerConnectionId { get; set; } = string.Empty;
-        public string OwnerUserId { get; set; } = string.Empty;
+        public int Id { get; set; }
+        public string Username { get; set; } = string.Empty;
+        public string ConnectionId { get; set; } = string.Empty;
+        public List<CoHostInfo> CoHosts { get; set; } = new();
+    }
+
+    public class CoHostInfo
+    {
+        public string Username { get; set; } = string.Empty;
+        public string Id { get; set; } = string.Empty;
+        public string ConnectionId { get; set; } = string.Empty;
+    }
+
+    public class ParticipantsList
+    {
+        public List<ParticipantInfo> UsersList { get; set; } = new();
+        public int TotalMembers { get; set; }
+    }
+
+    public class ParticipantInfo
+    {
+        public string Username { get; set; } = string.Empty;
+        public string Id { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty;
+        public string ConnectionId { get; set; } = string.Empty;
+    }
+
+    public class MediaSettings
+    {
+        public bool AudioEnabled { get; set; }
+        public bool VideoEnabled { get; set; }
+        public bool ScreenShareEnabled { get; set; }
+        public bool RecordingEnabled { get; set; }
+    }
+
+    public class StreamPermissions
+    {
+        public bool CanChat { get; set; }
+        public bool CanRaiseHand { get; set; }
+        public bool CanShareScreen { get; set; }
+    }
+
+    public class MessageRoom
+    {
+        public string RoomId { get; set; } = string.Empty;
+        public bool ChatEnabled { get; set; }
+        public string MessageRetention { get; set; } = string.Empty;
+        public List<ChatMessage> Messages { get; set; } = new();
+        public ModerationInfo Moderation { get; set; } = new();
+    }
+
+    public class ChatMessage
+    {
+        public string MessageId { get; set; } = string.Empty;
+        public MessageSender Sender { get; set; } = new();
         public string Type { get; set; } = string.Empty;
-        public int CurrentBitrate { get; set; }
-        public int TargetBitrate { get; set; }
-        public bool IsActive { get; set; }
-        public DateTime CreatedAt { get; set; }
-        public DateTime LastPacketTime { get; set; }
-        public int PacketLoss { get; set; }
-        public int Jitter { get; set; }
-        public List<RedundantPath> RedundantPaths { get; set; } = new();
-        public List<string> Subscribers { get; set; } = new();
+        public string Content { get; set; } = string.Empty;
+        public DateTime Timestamp { get; set; }
     }
 
-    public class RedundantPath
+    public class MessageSender
     {
-        public string PathId { get; set; } = string.Empty;
-        public bool IsActive { get; set; }
-        public int Priority { get; set; }
-        public DateTime LastUsedAt { get; set; }
+        public string Id { get; set; } = string.Empty;
+        public string Username { get; set; } = string.Empty;
+        public string Role { get; set; } = string.Empty;
     }
 
-    public class NetworkQuality
+    public class ModerationInfo
     {
-        public int Bandwidth { get; set; }
-        public int Latency { get; set; }
-        public int PacketLoss { get; set; }
-        public int Jitter { get; set; }
-        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+        public List<string> MutedUsers { get; set; } = new();
+        public List<string> DeletedMessages { get; set; } = new();
     }
 
-    public class QualitySettings
+    public class RealtimeInfo
     {
-        public int MaxBitrate { get; set; }
-        public int MinBitrate { get; set; }
-        public bool AdaptiveBitrate { get; set; }
-        public int BufferSizeMs { get; set; }
-        public int JitterBufferMs { get; set; }
+        public bool ReactionsEnabled { get; set; }
+        public List<StreamEvent> Events { get; set; } = new();
     }
 
-    public class StreamBuffer
+    public class StreamEvent
     {
-        public int BufferSizeMs { get; set; }
-        public int JitterBufferMs { get; set; }
-        public Queue<byte[]> Buffer { get; set; } = new();
+        public string EventId { get; set; } = string.Empty;
+        public string Type { get; set; } = string.Empty;
+        public DateTime Timestamp { get; set; }
     }
+
+    public class RTCSessionDescriptionInit
+    {
+        public string Type { get; set; } = string.Empty;
+        public string Sdp { get; set; } = string.Empty;
+    }
+
+    public class RTCIceCandidateInit
+    {
+        public string Candidate { get; set; } = string.Empty;
+        public string SdpMid { get; set; } = string.Empty;
+        public int? SdpMLineIndex { get; set; }
+        public string UsernameFragment { get; set; } = string.Empty;
+    }
+
 }

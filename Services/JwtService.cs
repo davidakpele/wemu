@@ -5,7 +5,7 @@ using System.Security.Claims;
 using System.Text;
 using wenu.Entities;
 
-namespace wumo.Services
+namespace wenu.Services
 {
     public class JwtService
     {

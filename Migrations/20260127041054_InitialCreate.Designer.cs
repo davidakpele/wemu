@@ -5,14 +5,14 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
-using wumo.Configs;
+using wenu.Configs;
 
 #nullable disable
 
 namespace wenu.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260123093709_InitialCreate")]
+    [Migration("20260127041054_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />

@@ -1008,7 +1008,7 @@
           }
         }
       },
-      "Scalar.AspNetCore/2.12.14": {
+      "Scalar.AspNetCore/2.12.18": {
         "type": "package",
         "compile": {
           "lib/net9.0/Scalar.AspNetCore.dll": {
@@ -3257,10 +3257,10 @@
         "pipelines.sockets.unofficial.nuspec"
       ]
     },
-    "Scalar.AspNetCore/2.12.14": {
-      "sha512": "VEGl5/zr5G/g/OYrYxBuYzt3/VCHnxzaOGZC3JoOV7i4quP0bbTrt4oDKCp+rqzjJqg6AkeWH5mJ/iMFysLwbQ==",
+    "Scalar.AspNetCore/2.12.18": {
+      "sha512": "SVO8iTlSZPxAklOl8BROup3GLNknLseWKMgLweSG7xyuAydnNt76YmKQfrIiRXmw7mx0z3zCcd0ZRva+vkPn0w==",
       "type": "package",
-      "path": "scalar.aspnetcore/2.12.14",
+      "path": "scalar.aspnetcore/2.12.18",
       "files": [
         ".nupkg.metadata",
         ".signature.p7s",
@@ -3272,7 +3272,7 @@
         "lib/net8.0/Scalar.AspNetCore.xml",
         "lib/net9.0/Scalar.AspNetCore.dll",
         "lib/net9.0/Scalar.AspNetCore.xml",
-        "scalar.aspnetcore.2.12.14.nupkg.sha512",
+        "scalar.aspnetcore.2.12.18.nupkg.sha512",
         "scalar.aspnetcore.nuspec"
       ]
     },
@@ -3784,7 +3784,7 @@
       "Microsoft.IdentityModel.Tokens >= 8.15.0",
       "Microsoft.VisualStudio.Azure.Containers.Tools.Targets >= 1.22.1",
       "Npgsql.EntityFrameworkCore.PostgreSQL >= 9.0.4",
-      "Scalar.AspNetCore >= 2.12.14",
+      "Scalar.AspNetCore >= 2.12.18",
       "StackExchange.Redis >= 2.10.1",
       "System.IdentityModel.Tokens.Jwt >= 8.15.0"
     ]
@@ -3887,7 +3887,7 @@
           },
           "Scalar.AspNetCore": {
             "target": "Package",
-            "version": "[2.12.14, )"
+            "version": "[2.12.18, )"
           },
           "StackExchange.Redis": {
             "target": "Package",

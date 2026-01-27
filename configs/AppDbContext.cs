@@ -6,7 +6,7 @@ using Microsoft.Extensions.Configuration;
 using System.IO;
 using wenu.Entities;
 
-namespace wumo.Configs
+namespace wenu.Configs
 {
     public class AppDbContext : IdentityDbContext<Users, IdentityRole<int>, int>
     {

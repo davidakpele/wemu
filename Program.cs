@@ -1,26 +1,25 @@
-using FluentValidation;
-using FluentValidation.AspNetCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Text.Json;
+using wenu.Services;
+using Scalar.AspNetCore;
+using wenu.Configs;
 using wenu.Entities;
 using wenu.Middleware;
-using wenu.Services;
 using wenu.Validators;
-using Scalar.AspNetCore;
-using wumo.Configs;
-using wumo.Services;
 using wenu.Enums;
+using FluentValidation;
+using FluentValidation.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
-    options.MaximumReceiveMessageSize = 1024 * 1024 * 10; // 10MB for high-quality streams
+    options.MaximumReceiveMessageSize = 1024 * 1024 * 10; 
     options.StreamBufferCapacity = 100;
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
     options.HandshakeTimeout = TimeSpan.FromSeconds(15);
@@ -107,7 +106,7 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 
 builder.Services.AddMemoryCache(options =>
 {
-    options.SizeLimit = 1024 * 1024 * 512; // 512MB for stream buffers
+    options.SizeLimit = 1024 * 1024 * 512; 
     options.CompactionPercentage = 0.25;
     options.ExpirationScanFrequency = TimeSpan.FromMinutes(5);
 });
@@ -146,6 +145,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-app.MapHub<CallHub>("/hubs/call");
+app.MapHub<StreamingHub>("/hubs/streaming");
 
 app.Run();

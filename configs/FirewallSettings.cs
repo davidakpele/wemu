@@ -1,4 +1,4 @@
-namespace wumo.Configs
+namespace wenu.Configs
 {
     public class FirewallSettings
     {
