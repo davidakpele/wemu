@@ -239,7 +239,7 @@ namespace wenu.Services
             });
 
             var existingProducers = _mediaServer.GetProducersInRoom(roomId, userId.ToString());
-
+            
             var streamData = new
             {
                 data = new
@@ -285,11 +285,23 @@ namespace wenu.Services
                         userId = p.UserId,
                         producerId = p.ProducerId,
                         kind = p.Kind
-                    })
+                    }).ToList()
                 }
             };
 
             await Clients.Caller.SendAsync("JoinedStream", streamData);
+
+            // Automatically notify viewer about existing producers
+            foreach (var producer in existingProducers)
+            {
+                await Clients.Caller.SendAsync("NewProducer", new
+                {
+                    userId = producer.UserId,
+                    username = producer.UserId, // Will be looked up by client
+                    producerId = producer.ProducerId,
+                    kind = producer.Kind
+                });
+            }
 
             _logger.LogInformation("User {Username} joined stream {RoomId}", username, roomId);
         }
@@ -339,19 +351,14 @@ namespace wenu.Services
 
             _mediaServer.AddProducer(roomId, userId, producer);
 
-            var answer = new RTCSessionDescriptionInit
-            {
-                Type = "answer",
-                Sdp = GenerateSdpAnswer(offer.Sdp, kind)
-            };
-
+            // Notify caller that producer is created (no answer needed, peer-to-peer handles it)
             await Clients.Caller.SendAsync("ProducerCreated", new
             {
                 producerId = producerId,
-                kind = kind,
-                answer = answer
+                kind = kind
             });
 
+            // Notify all other participants about new producer
             await Clients.OthersInGroup(roomId).SendAsync("NewProducer", new
             {
                 userId = userId,
@@ -360,7 +367,7 @@ namespace wenu.Services
                 kind = kind
             });
 
-            _logger.LogInformation("User {Username} started producing {Kind} in room {RoomId}",
+            _logger.LogInformation("User {Username} started producing {Kind} in room {RoomId}", 
                 connection.Username, kind, roomId);
         }
 
@@ -404,22 +411,111 @@ namespace wenu.Services
 
             _mediaServer.AddConsumer(roomId, userId, producerId, consumer);
 
-            var offer = new RTCSessionDescriptionInit
-            {
-                Type = "offer",
-                Sdp = GenerateSdpOffer(producer.Kind, producerId)
-            };
-
+            // Notify the consumer - they need to create offer to producer
             await Clients.Caller.SendAsync("ConsumerCreated", new
             {
                 consumerId = consumerId,
                 producerId = producerId,
-                kind = producer.Kind,
+                producerUserId = producer.UserId,
+                kind = producer.Kind
+            });
+
+            _logger.LogInformation("User {Username} consuming {Kind} from producer {ProducerId} in room {RoomId}", 
+                connection.Username, producer.Kind, producerId, roomId);
+        }
+
+        public async Task SendOfferToProducer(string roomId, string producerUserId, RTCSessionDescriptionInit offer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            // Find producer's connection
+            var producerConnection = _streamConnections.Values.FirstOrDefault(c => c.UserId.ToString() == producerUserId && c.RoomId == roomId);
+            
+            if (producerConnection == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Producer not found" });
+                return;
+            }
+
+            // Send offer to producer
+            await Clients.Client(producerConnection.ConnectionId).SendAsync("ReceiveOfferFromConsumer", new
+            {
+                consumerUserId = connection.UserId.ToString(),
+                consumerConnectionId = connectionId,
                 offer = offer
             });
 
-            _logger.LogInformation("User {Username} consuming {Kind} from producer {ProducerId} in room {RoomId}",
-                connection.Username, producer.Kind, producerId, roomId);
+            _logger.LogInformation("Offer sent from consumer {Consumer} to producer {Producer}", 
+                connection.Username, producerUserId);
+        }
+
+        public async Task SendAnswerToConsumer(string roomId, string consumerConnectionId, RTCSessionDescriptionInit answer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            // Send answer back to consumer
+            await Clients.Client(consumerConnectionId).SendAsync("ReceiveAnswerFromProducer", new
+            {
+                producerUserId = connection.UserId.ToString(),
+                answer = answer
+            });
+
+            _logger.LogInformation("Answer sent from producer {Producer} to consumer", connection.Username);
+        }
+
+        public async Task SendIceCandidateToProducer(string roomId, string producerUserId, RTCIceCandidateInit candidate)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            var producerConnection = _streamConnections.Values.FirstOrDefault(c => c.UserId.ToString() == producerUserId && c.RoomId == roomId);
+            
+            if (producerConnection == null)
+                return;
+
+            await Clients.Client(producerConnection.ConnectionId).SendAsync("ReceiveIceCandidateFromConsumer", new
+            {
+                consumerConnectionId = connectionId,
+                candidate = candidate
+            });
+
+            _logger.LogDebug("ICE candidate sent from consumer to producer {Producer}", producerUserId);
+        }
+
+        public async Task SendIceCandidateToConsumer(string roomId, string consumerConnectionId, RTCIceCandidateInit candidate)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            await Clients.Client(consumerConnectionId).SendAsync("ReceiveIceCandidateFromProducer", new
+            {
+                producerUserId = connection.UserId.ToString(),
+                candidate = candidate
+            });
+
+            _logger.LogDebug("ICE candidate sent from producer {Producer} to consumer", connection.Username);
         }
 
         public async Task ConsumerAnswer(string roomId, string consumerId, RTCSessionDescriptionInit answer)
@@ -449,7 +545,7 @@ namespace wenu.Services
                 return;
 
             var producer = _mediaServer.GetProducer(roomId, connection.UserId.ToString());
-
+            
             if (producer != null && producer.ProducerId == producerId)
             {
                 producer.IsActive = false;
@@ -473,7 +569,7 @@ namespace wenu.Services
                 return;
 
             var producer = _mediaServer.GetProducer(roomId, connection.UserId.ToString());
-
+            
             if (producer != null && producer.ProducerId == producerId)
             {
                 producer.IsActive = true;
@@ -537,7 +633,7 @@ namespace wenu.Services
                 message = $"{hostConnection.Username} invited you to be a co-host"
             });
 
-            _logger.LogInformation("Host {Host} invited {User} to be co-host in room {RoomId}",
+            _logger.LogInformation("Host {Host} invited {User} to be co-host in room {RoomId}", 
                 hostConnection.Username, targetUsername, roomId);
         }
 
@@ -600,7 +696,7 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
-            _logger.LogInformation("User {Username} accepted co-host invite in room {RoomId}",
+            _logger.LogInformation("User {Username} accepted co-host invite in room {RoomId}", 
                 connection.Username, roomId);
         }
 
@@ -613,7 +709,7 @@ namespace wenu.Services
 
             await Clients.Caller.SendAsync("CoHostInviteRejected", new { roomId });
 
-            _logger.LogInformation("User {Username} rejected co-host invite in room {RoomId}",
+            _logger.LogInformation("User {Username} rejected co-host invite in room {RoomId}", 
                 connection.Username, roomId);
         }
 
@@ -679,7 +775,7 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
-            _logger.LogInformation("Host {Host} removed {User} from co-host in room {RoomId}",
+            _logger.LogInformation("Host {Host} removed {User} from co-host in room {RoomId}", 
                 hostConnection.Username, targetUsername, roomId);
         }
 
@@ -738,7 +834,7 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
-            _logger.LogInformation("User {Username} left co-host role in room {RoomId}",
+            _logger.LogInformation("User {Username} left co-host role in room {RoomId}", 
                 connection.Username, roomId);
         }
 
@@ -947,142 +1043,7 @@ namespace wenu.Services
             return new string(Enumerable.Repeat(chars, 20)
                 .Select(s => s[random.Next(s.Length)]).ToArray());
         }
-
-        private string GenerateSdpAnswer(string offerSdp, string kind)
-        {
-            var sdpLines = new List<string>
-            {
-                "v=0",
-                $"o=- {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} 2 IN IP4 127.0.0.1",
-                "s=-",
-                "t=0 0",
-                "a=group:BUNDLE 0",
-                "a=msid-semantic: WMS *"
-            };
-
-            if (kind == "audio")
-            {
-                sdpLines.AddRange(new[]
-                {
-                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 103 104 9 0 8 106 105 13 110 112 113 126",
-                    "c=IN IP4 0.0.0.0",
-                    "a=rtcp:9 IN IP4 0.0.0.0",
-                    "a=ice-ufrag:UFRAG",
-                    "a=ice-pwd:PWD",
-                    "a=ice-options:trickle",
-                    "a=fingerprint:sha-256 FINGERPRINT",
-                    "a=setup:active",
-                    "a=mid:0",
-                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
-                    "a=sendrecv",
-                    "a=rtcp-mux",
-                    "a=rtpmap:111 opus/48000/2",
-                    "a=rtcp-fb:111 transport-cc",
-                    "a=fmtp:111 minptime=10;useinbandfec=1",
-                    "a=rtpmap:103 ISAC/16000",
-                    "a=rtpmap:104 ISAC/32000"
-                });
-            }
-            else if (kind == "video")
-            {
-                sdpLines.AddRange(new[]
-                {
-                    "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 102",
-                    "c=IN IP4 0.0.0.0",
-                    "a=rtcp:9 IN IP4 0.0.0.0",
-                    "a=ice-ufrag:UFRAG",
-                    "a=ice-pwd:PWD",
-                    "a=ice-options:trickle",
-                    "a=fingerprint:sha-256 FINGERPRINT",
-                    "a=setup:active",
-                    "a=mid:0",
-                    "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset",
-                    "a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
-                    "a=extmap:4 urn:3gpp:video-orientation",
-                    "a=sendrecv",
-                    "a=rtcp-mux",
-                    "a=rtcp-rsize",
-                    "a=rtpmap:96 VP8/90000",
-                    "a=rtcp-fb:96 goog-remb",
-                    "a=rtcp-fb:96 transport-cc",
-                    "a=rtcp-fb:96 ccm fir",
-                    "a=rtcp-fb:96 nack",
-                    "a=rtcp-fb:96 nack pli",
-                    "a=rtpmap:97 VP9/90000",
-                    "a=rtcp-fb:97 goog-remb",
-                    "a=rtcp-fb:97 transport-cc",
-                    "a=rtcp-fb:97 ccm fir",
-                    "a=rtcp-fb:97 nack",
-                    "a=rtcp-fb:97 nack pli"
-                });
-            }
-
-            return string.Join("\r\n", sdpLines) + "\r\n";
-        }
-
-        private string GenerateSdpOffer(string kind, string producerId)
-        {
-            var sdpLines = new List<string>
-            {
-                "v=0",
-                $"o=- {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} 2 IN IP4 127.0.0.1",
-                "s=-",
-                "t=0 0",
-                "a=group:BUNDLE 0",
-                "a=msid-semantic: WMS *"
-            };
-
-            if (kind == "audio")
-            {
-                sdpLines.AddRange(new[]
-                {
-                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 103 104 9 0 8 106 105 13 110 112 113 126",
-                    "c=IN IP4 0.0.0.0",
-                    "a=rtcp:9 IN IP4 0.0.0.0",
-                    "a=ice-ufrag:UFRAG",
-                    "a=ice-pwd:PWD",
-                    "a=ice-options:trickle",
-                    "a=fingerprint:sha-256 FINGERPRINT",
-                    "a=setup:actpass",
-                    "a=mid:0",
-                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
-                    "a=recvonly",
-                    "a=rtcp-mux",
-                    "a=rtpmap:111 opus/48000/2",
-                    "a=rtcp-fb:111 transport-cc",
-                    "a=fmtp:111 minptime=10;useinbandfec=1"
-                });
-            }
-            else if (kind == "video")
-            {
-                sdpLines.AddRange(new[]
-                {
-                    "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 102",
-                    "c=IN IP4 0.0.0.0",
-                    "a=rtcp:9 IN IP4 0.0.0.0",
-                    "a=ice-ufrag:UFRAG",
-                    "a=ice-pwd:PWD",
-                    "a=ice-options:trickle",
-                    "a=fingerprint:sha-256 FINGERPRINT",
-                    "a=setup:actpass",
-                    "a=mid:0",
-                    "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset",
-                    "a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
-                    "a=recvonly",
-                    "a=rtcp-mux",
-                    "a=rtcp-rsize",
-                    "a=rtpmap:96 VP8/90000",
-                    "a=rtcp-fb:96 goog-remb",
-                    "a=rtcp-fb:96 transport-cc",
-                    "a=rtcp-fb:96 ccm fir",
-                    "a=rtcp-fb:96 nack",
-                    "a=rtcp-fb:96 nack pli"
-                });
-            }
-
-            return string.Join("\r\n", sdpLines) + "\r\n";
-        }
-
+    
         public async Task SendOffer(string roomId, string toUserId, RTCSessionDescriptionInit offer)
         {
             try
@@ -1107,7 +1068,7 @@ namespace wenu.Services
                     roomId = roomId
                 });
 
-                _logger.LogInformation("Offer sent from {From} to {To} in room {RoomId}",
+                _logger.LogInformation("Offer sent from {From} to {To} in room {RoomId}", 
                     Context.UserIdentifier, toUserId, roomId);
             }
             catch (Exception ex)
@@ -1140,7 +1101,7 @@ namespace wenu.Services
                     answer = answer
                 });
 
-                _logger.LogInformation("Answer sent from {From} to {To} in room {RoomId}",
+                _logger.LogInformation("Answer sent from {From} to {To} in room {RoomId}", 
                     Context.UserIdentifier, toUserId, roomId);
             }
             catch (Exception ex)
@@ -1173,7 +1134,7 @@ namespace wenu.Services
                     candidate = candidate
                 });
 
-                _logger.LogDebug("ICE candidate sent from {From} to {To} in room {RoomId}",
+                _logger.LogDebug("ICE candidate sent from {From} to {To} in room {RoomId}", 
                     Context.UserIdentifier, toUserId, roomId);
             }
             catch (Exception ex)
@@ -1205,7 +1166,7 @@ namespace wenu.Services
                     });
                 }
 
-                _logger.LogInformation("Participant {Username} ({UserId}) joined room {RoomId} - notified host/co-hosts",
+                _logger.LogInformation("Participant {Username} ({UserId}) joined room {RoomId} - notified host/co-hosts", 
                     username, userId, roomId);
             }
             catch (Exception ex)
