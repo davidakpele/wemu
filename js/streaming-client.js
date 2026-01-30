@@ -10,6 +10,7 @@ class StreamingClient {
         this.localStream = null;
         this.producers = new Map(); // Map of producerId -> kind
         this.consumers = new Map(); // Map of consumerId -> MediaStream
+        this.currentRoomId = null; // Track current room
         
         this.configuration = {
             iceServers: [
@@ -72,7 +73,7 @@ class StreamingClient {
 
         this.connection.on('NewProducer', async (data) => {
             console.log('New producer available:', data);
-            await this.consumeMedia(data.producerId);
+            this.onNewProducer(data);
         });
 
         this.connection.on('ConsumerCreated', async (data) => {
@@ -137,6 +138,23 @@ class StreamingClient {
             await this.handleReceiveICECandidate(data);
         });
 
+        // New peer-to-peer signaling
+        this.connection.on('ReceiveOfferFromConsumer', async (data) => {
+            await this.handleOfferFromConsumer(data);
+        });
+
+        this.connection.on('ReceiveAnswerFromProducer', async (data) => {
+            await this.handleAnswerFromProducer(data);
+        });
+
+        this.connection.on('ReceiveIceCandidateFromConsumer', async (data) => {
+            await this.handleIceCandidateFromConsumer(data);
+        });
+
+        this.connection.on('ReceiveIceCandidateFromProducer', async (data) => {
+            await this.handleIceCandidateFromProducer(data);
+        });
+
         this.connection.onreconnecting(() => {
             console.log('Reconnecting...');
         });
@@ -195,37 +213,20 @@ class StreamingClient {
 
     async produceTrack(roomId, kind, track) {
         try {
-            // Create peer connection for producing
-            const pc = new RTCPeerConnection(this.configuration);
+            // Simply notify server that we're producing - no peer connection needed yet
+            const producerId = `producer-${kind}-${Date.now()}`;
             
-            // Add track to peer connection
-            pc.addTrack(track, this.localStream);
+            // Store track for when consumers request it
+            if (!this.producerTracks) {
+                this.producerTracks = new Map();
+            }
+            this.producerTracks.set(kind, track);
 
-            // Create offer
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            // Wait for ICE gathering to complete
-            await new Promise(resolve => {
-                if (pc.iceGatheringState === 'complete') {
-                    resolve();
-                } else {
-                    pc.addEventListener('icegatheringstatechange', () => {
-                        if (pc.iceGatheringState === 'complete') {
-                            resolve();
-                        }
-                    });
-                }
-            });
-
-            // Send offer to server
+            // Notify server (no SDP needed, just announcing availability)
             await this.connection.invoke('ProduceMedia', roomId, kind, {
-                type: pc.localDescription.type,
-                sdp: pc.localDescription.sdp
+                type: 'offer',
+                sdp: '' // Not needed for peer-to-peer
             });
-
-            // Store peer connection
-            this.peerConnections.set(`producer-${kind}`, pc);
 
         } catch (err) {
             console.error(`Error producing ${kind}:`, err);
@@ -234,49 +235,73 @@ class StreamingClient {
     }
 
     async handleProducerCreated(data) {
-        const { producerId, kind, answer } = data;
-        
-        const pc = this.peerConnections.get(`producer-${kind}`);
-        if (pc) {
-            await pc.setRemoteDescription(new RTCSessionDescription(answer));
-            this.producers.set(producerId, kind);
-            console.log(`${kind} producer created with ID: ${producerId}`);
-        }
+        const { producerId, kind } = data;
+        this.producers.set(producerId, kind);
+        console.log(`${kind} producer created with ID: ${producerId}`);
     }
 
     // Consume media from another user
-    async consumeMedia(producerId) {
+    async consumeMedia(roomIdOrProducerId, producerIdParam = null) {
         try {
-            await this.connection.invoke('ConsumeMedia', this.currentRoomId, producerId);
+            let roomId, producerId;
+            
+            if (producerIdParam) {
+                roomId = roomIdOrProducerId;
+                producerId = producerIdParam;
+            } else {
+                roomId = this.currentRoomId;
+                producerId = roomIdOrProducerId;
+            }
+            
+            if (!roomId) {
+                console.error('No room ID available for consuming media');
+                return;
+            }
+            
+            console.log(`Requesting to consume media: roomId=${roomId}, producerId=${producerId}`);
+            await this.connection.invoke('ConsumeMedia', roomId, producerId);
         } catch (err) {
             console.error('Error consuming media:', err);
         }
     }
 
     async handleConsumerCreated(data) {
-        const { consumerId, producerId, kind, offer } = data;
+        const { consumerId, producerId, producerUserId, kind } = data;
 
         try {
-            // Create peer connection for consuming
+            console.log(`Creating consumer for ${kind} from producer ${producerUserId}`);
+            
+            // Create peer connection for this consumer
             const pc = new RTCPeerConnection(this.configuration);
 
             // Handle incoming tracks
             pc.ontrack = (event) => {
-                console.log(`Received ${kind} track`);
+                console.log(`Received ${kind} track from producer ${producerUserId}`);
                 const stream = event.streams[0];
                 this.consumers.set(consumerId, stream);
                 this.onRemoteStream(stream, producerId, kind);
             };
 
-            // Set remote description (offer from server)
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    this.connection.invoke('SendIceCandidateToProducer', this.currentRoomId, producerUserId, {
+                        candidate: event.candidate.candidate,
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex
+                    }).catch(console.error);
+                }
+            };
 
-            // Create answer
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
+            // Create offer (consumer initiates connection)
+            const offer = await pc.createOffer({
+                offerToReceiveAudio: kind === 'audio',
+                offerToReceiveVideo: kind === 'video'
+            });
+            await pc.setLocalDescription(offer);
 
             // Wait for ICE gathering
-            await new Promise(resolve => {
+            await new Promise((resolve) => {
                 if (pc.iceGatheringState === 'complete') {
                     resolve();
                 } else {
@@ -285,16 +310,25 @@ class StreamingClient {
                             resolve();
                         }
                     });
+                    // Timeout after 3 seconds
+                    setTimeout(resolve, 3000);
                 }
             });
 
-            // Send answer to server
-            await this.connection.invoke('ConsumerAnswer', this.currentRoomId, consumerId, {
+            // Send offer to producer
+            await this.connection.invoke('SendOfferToProducer', this.currentRoomId, producerUserId, {
                 type: pc.localDescription.type,
                 sdp: pc.localDescription.sdp
             });
 
+            // Store peer connection
             this.peerConnections.set(`consumer-${consumerId}`, pc);
+            
+            // Store mapping for answer handling
+            if (!this.consumerPcMapping) {
+                this.consumerPcMapping = new Map();
+            }
+            this.consumerPcMapping.set(producerUserId, pc);
 
         } catch (err) {
             console.error('Error handling consumer creation:', err);
@@ -363,6 +397,113 @@ class StreamingClient {
         await this.connection.invoke('EndStream', roomId);
     }
 
+    // New peer-to-peer signaling handlers
+    async handleOfferFromConsumer(data) {
+        const { consumerUserId, consumerConnectionId, offer } = data;
+        
+        try {
+            console.log(`Received offer from consumer ${consumerUserId}`);
+            
+            // Create peer connection for this consumer
+            const pc = new RTCPeerConnection(this.configuration);
+
+            // Add our local stream tracks to this connection
+            if (this.localStream) {
+                this.localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, this.localStream);
+                });
+            }
+
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    this.connection.invoke('SendIceCandidateToConsumer', this.currentRoomId, consumerConnectionId, {
+                        candidate: event.candidate.candidate,
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex
+                    }).catch(console.error);
+                }
+            };
+
+            // Set remote description (offer from consumer)
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+            // Create answer
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            // Wait for ICE gathering
+            await new Promise((resolve) => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    pc.addEventListener('icegatheringstatechange', () => {
+                        if (pc.iceGatheringState === 'complete') {
+                            resolve();
+                        }
+                    });
+                    setTimeout(resolve, 3000);
+                }
+            });
+
+            // Send answer to consumer
+            await this.connection.invoke('SendAnswerToConsumer', this.currentRoomId, consumerConnectionId, {
+                type: pc.localDescription.type,
+                sdp: pc.localDescription.sdp
+            });
+
+            // Store peer connection
+            this.peerConnections.set(`to-consumer-${consumerConnectionId}`, pc);
+
+        } catch (err) {
+            console.error('Error handling offer from consumer:', err);
+        }
+    }
+
+    async handleAnswerFromProducer(data) {
+        const { producerUserId, answer } = data;
+        
+        try {
+            console.log(`Received answer from producer ${producerUserId}`);
+            
+            const pc = this.consumerPcMapping?.get(producerUserId);
+            if (pc) {
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                console.log('Answer set successfully');
+            } else {
+                console.error('No peer connection found for producer:', producerUserId);
+            }
+        } catch (err) {
+            console.error('Error handling answer from producer:', err);
+        }
+    }
+
+    async handleIceCandidateFromConsumer(data) {
+        const { consumerConnectionId, candidate } = data;
+        
+        try {
+            const pc = this.peerConnections.get(`to-consumer-${consumerConnectionId}`);
+            if (pc && candidate.candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+        } catch (err) {
+            console.error('Error adding ICE candidate from consumer:', err);
+        }
+    }
+
+    async handleIceCandidateFromProducer(data) {
+        const { producerUserId, candidate } = data;
+        
+        try {
+            const pc = this.consumerPcMapping?.get(producerUserId);
+            if (pc && candidate.candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+        } catch (err) {
+            console.error('Error adding ICE candidate from producer:', err);
+        }
+    }
+
     // Legacy WebRTC signaling handlers (for peer-to-peer)
     async handleReceiveOffer(data) {
         const { fromUserId, offer, roomId } = data;
@@ -421,6 +562,7 @@ class StreamingClient {
     onProducerPaused(data) {}
     onProducerResumed(data) {}
     onProducerClosed(data) {}
+    onNewProducer(data) {}
     onRemoteStream(stream, producerId, kind) {
         console.log('Received remote stream:', { producerId, kind });
     }

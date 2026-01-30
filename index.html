@@ -658,6 +658,7 @@
             client.onProducerPaused = handleProducerPaused;
             client.onProducerResumed = handleProducerResumed;
             client.onProducerClosed = handleProducerClosed;
+        client.onNewProducer = handleNewProducer;
 
             try {
                 await client.connect();
@@ -680,6 +681,7 @@
 
         function handleJoinedStream(data) {
             currentRoomId = data.data.stream.roomid;
+            client.currentRoomId = currentRoomId; // Store in client for consumption
             streamStartTime = new Date(data.data.status.start_time);
             updateStreamStatus('live');
             updateButtons();
@@ -689,11 +691,7 @@
             participantCount.textContent = data.data.participants.total_members;
             updateParticipantList(data.data.participants.users_list);
             
-            if (data.data.existing_producers) {
-                data.data.existing_producers.forEach(producer => {
-                    client.consumeMedia(producer.producerId);
-                });
-            }
+            console.log('Joined stream, existing producers:', data.data.existing_producers);
         }
 
         function handleUserJoined(data) {
@@ -759,6 +757,13 @@
         function handleProducerClosed(data) {
             const wrapper = document.getElementById(`wrapper-${data.producerId}`);
             if (wrapper) wrapper.remove();
+        }
+
+        function handleNewProducer(data) {
+            console.log('New producer detected:', data);
+            if (client && client.currentRoomId) {
+                client.consumeMedia(client.currentRoomId, data.producerId);
+            }
         }
 
         // Button handlers
