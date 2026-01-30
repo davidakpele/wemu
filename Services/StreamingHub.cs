@@ -15,10 +15,12 @@ namespace wenu.Services
         private static readonly ConcurrentDictionary<string, StreamRoom> _streamRooms = new();
         private static readonly ConcurrentDictionary<string, StreamConnection> _streamConnections = new();
         private readonly ILogger<StreamingHub> _logger;
+        private readonly MediaServer _mediaServer;
 
-        public StreamingHub(ILogger<StreamingHub> logger)
+        public StreamingHub(ILogger<StreamingHub> logger, MediaServer mediaServer)
         {
             _logger = logger;
+            _mediaServer = mediaServer;
         }
 
         public async Task StartStream(string username, int userId, string title, string description, string category, string visibility, string type)
@@ -96,6 +98,8 @@ namespace wenu.Services
             _streamConnections[connectionId] = hostConnection;
 
             await Groups.AddToGroupAsync(connectionId, roomId);
+
+            _mediaServer.GetOrCreateRoom(roomId);
 
             var response = new
             {
@@ -217,7 +221,6 @@ namespace wenu.Services
 
             room.MessageRoom.Messages.Add(joinMessage);
 
-            // Send updated participant list to ALL users in the room
             var updatedParticipantsList = room.Participants.UsersList.Select(p => new
             {
                 username = p.Username,
@@ -234,6 +237,8 @@ namespace wenu.Services
                 total_members = room.Participants.TotalMembers,
                 participants = updatedParticipantsList
             });
+
+            var existingProducers = _mediaServer.GetProducersInRoom(roomId, userId.ToString());
 
             var streamData = new
             {
@@ -274,13 +279,232 @@ namespace wenu.Services
                     media_settings = room.MediaSettings,
                     permissions = room.Permissions,
                     message_room = room.MessageRoom,
-                    realtime = room.Realtime
+                    realtime = room.Realtime,
+                    existing_producers = existingProducers.Select(p => new
+                    {
+                        userId = p.UserId,
+                        producerId = p.ProducerId,
+                        kind = p.Kind
+                    })
                 }
             };
 
             await Clients.Caller.SendAsync("JoinedStream", streamData);
 
             _logger.LogInformation("User {Username} joined stream {RoomId}", username, roomId);
+        }
+
+        public async Task ProduceMedia(string roomId, string kind, RTCSessionDescriptionInit offer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (connection.Role != "host" && connection.Role != "co-host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host or co-host can produce media" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var producerId = Guid.NewGuid().ToString();
+            var userId = connection.UserId.ToString();
+
+            var producer = new MediaProducer
+            {
+                UserId = userId,
+                ProducerId = producerId,
+                Kind = kind,
+                Offer = offer,
+                CreatedAt = DateTime.UtcNow,
+                IsActive = true,
+                TrackSettings = new MediaTrackSettings
+                {
+                    TrackId = Guid.NewGuid().ToString(),
+                    Enabled = true,
+                    MaxBitrate = kind == "video" ? 2500000 : 128000,
+                    Resolution = kind == "video" ? "1280x720" : null,
+                    FrameRate = kind == "video" ? 30 : null
+                }
+            };
+
+            _mediaServer.AddProducer(roomId, userId, producer);
+
+            var answer = new RTCSessionDescriptionInit
+            {
+                Type = "answer",
+                Sdp = GenerateSdpAnswer(offer.Sdp, kind)
+            };
+
+            await Clients.Caller.SendAsync("ProducerCreated", new
+            {
+                producerId = producerId,
+                kind = kind,
+                answer = answer
+            });
+
+            await Clients.OthersInGroup(roomId).SendAsync("NewProducer", new
+            {
+                userId = userId,
+                username = connection.Username,
+                producerId = producerId,
+                kind = kind
+            });
+
+            _logger.LogInformation("User {Username} started producing {Kind} in room {RoomId}",
+                connection.Username, kind, roomId);
+        }
+
+        public async Task ConsumeMedia(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var producers = _mediaServer.GetProducersInRoom(roomId);
+            var producer = producers.FirstOrDefault(p => p.ProducerId == producerId);
+
+            if (producer == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Producer not found" });
+                return;
+            }
+
+            var consumerId = Guid.NewGuid().ToString();
+            var userId = connection.UserId.ToString();
+
+            var consumer = new MediaConsumer
+            {
+                ConsumerId = consumerId,
+                UserId = userId,
+                ProducerId = producerId,
+                Kind = producer.Kind,
+                CreatedAt = DateTime.UtcNow,
+                IsActive = true
+            };
+
+            _mediaServer.AddConsumer(roomId, userId, producerId, consumer);
+
+            var offer = new RTCSessionDescriptionInit
+            {
+                Type = "offer",
+                Sdp = GenerateSdpOffer(producer.Kind, producerId)
+            };
+
+            await Clients.Caller.SendAsync("ConsumerCreated", new
+            {
+                consumerId = consumerId,
+                producerId = producerId,
+                kind = producer.Kind,
+                offer = offer
+            });
+
+            _logger.LogInformation("User {Username} consuming {Kind} from producer {ProducerId} in room {RoomId}",
+                connection.Username, producer.Kind, producerId, roomId);
+        }
+
+        public async Task ConsumerAnswer(string roomId, string consumerId, RTCSessionDescriptionInit answer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            await Clients.Caller.SendAsync("ConsumerAnswerReceived", new
+            {
+                consumerId = consumerId,
+                success = true
+            });
+
+            _logger.LogDebug("Consumer answer received for {ConsumerId} in room {RoomId}", consumerId, roomId);
+        }
+
+        public async Task PauseProducer(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            var producer = _mediaServer.GetProducer(roomId, connection.UserId.ToString());
+
+            if (producer != null && producer.ProducerId == producerId)
+            {
+                producer.IsActive = false;
+
+                await Clients.Group(roomId).SendAsync("ProducerPaused", new
+                {
+                    userId = connection.UserId.ToString(),
+                    producerId = producerId,
+                    kind = producer.Kind
+                });
+
+                _logger.LogInformation("Producer {ProducerId} paused in room {RoomId}", producerId, roomId);
+            }
+        }
+
+        public async Task ResumeProducer(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            var producer = _mediaServer.GetProducer(roomId, connection.UserId.ToString());
+
+            if (producer != null && producer.ProducerId == producerId)
+            {
+                producer.IsActive = true;
+
+                await Clients.Group(roomId).SendAsync("ProducerResumed", new
+                {
+                    userId = connection.UserId.ToString(),
+                    producerId = producerId,
+                    kind = producer.Kind
+                });
+
+                _logger.LogInformation("Producer {ProducerId} resumed in room {RoomId}", producerId, roomId);
+            }
+        }
+
+        public async Task CloseProducer(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
+
+            await Clients.Group(roomId).SendAsync("ProducerClosed", new
+            {
+                userId = connection.UserId.ToString(),
+                producerId = producerId
+            });
+
+            _logger.LogInformation("Producer {ProducerId} closed in room {RoomId}", producerId, roomId);
         }
 
         public async Task InviteCoHost(string roomId, string targetUsername, int targetUserId)
@@ -313,7 +537,7 @@ namespace wenu.Services
                 message = $"{hostConnection.Username} invited you to be a co-host"
             });
 
-            _logger.LogInformation("Host {Host} invited {User} to be co-host in room {RoomId}", 
+            _logger.LogInformation("Host {Host} invited {User} to be co-host in room {RoomId}",
                 hostConnection.Username, targetUsername, roomId);
         }
 
@@ -376,7 +600,7 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
-            _logger.LogInformation("User {Username} accepted co-host invite in room {RoomId}", 
+            _logger.LogInformation("User {Username} accepted co-host invite in room {RoomId}",
                 connection.Username, roomId);
         }
 
@@ -389,7 +613,7 @@ namespace wenu.Services
 
             await Clients.Caller.SendAsync("CoHostInviteRejected", new { roomId });
 
-            _logger.LogInformation("User {Username} rejected co-host invite in room {RoomId}", 
+            _logger.LogInformation("User {Username} rejected co-host invite in room {RoomId}",
                 connection.Username, roomId);
         }
 
@@ -428,6 +652,7 @@ namespace wenu.Services
             if (targetConnection != null)
             {
                 targetConnection.Role = "viewer";
+                _mediaServer.RemoveProducer(roomId, targetConnection.UserId.ToString());
             }
 
             var message = new ChatMessage
@@ -454,7 +679,7 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
-            _logger.LogInformation("Host {Host} removed {User} from co-host in room {RoomId}", 
+            _logger.LogInformation("Host {Host} removed {User} from co-host in room {RoomId}",
                 hostConnection.Username, targetUsername, roomId);
         }
 
@@ -487,6 +712,7 @@ namespace wenu.Services
             }
 
             connection.Role = "viewer";
+            _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
 
             var message = new ChatMessage
             {
@@ -512,7 +738,7 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
-            _logger.LogInformation("User {Username} left co-host role in room {RoomId}", 
+            _logger.LogInformation("User {Username} left co-host role in room {RoomId}",
                 connection.Username, roomId);
         }
 
@@ -540,6 +766,9 @@ namespace wenu.Services
                 room.Host.CoHosts.Remove(coHost);
             }
 
+            _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
+            _mediaServer.RemoveAllConsumersForUser(roomId, connection.UserId.ToString());
+
             await Groups.RemoveFromGroupAsync(connectionId, roomId);
 
             var leaveMessage = new ChatMessage
@@ -558,7 +787,6 @@ namespace wenu.Services
 
             room.MessageRoom.Messages.Add(leaveMessage);
 
-            // Send updated participant list to ALL remaining users in the room
             var updatedParticipantsList = room.Participants.UsersList.Select(p => new
             {
                 username = p.Username,
@@ -597,6 +825,8 @@ namespace wenu.Services
 
             room.State = "ended";
             room.EndTime = DateTime.UtcNow;
+
+            _mediaServer.RemoveRoom(roomId);
 
             await Clients.Group(roomId).SendAsync("StreamEnded", new
             {
@@ -717,7 +947,142 @@ namespace wenu.Services
             return new string(Enumerable.Repeat(chars, 20)
                 .Select(s => s[random.Next(s.Length)]).ToArray());
         }
-    
+
+        private string GenerateSdpAnswer(string offerSdp, string kind)
+        {
+            var sdpLines = new List<string>
+            {
+                "v=0",
+                $"o=- {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} 2 IN IP4 127.0.0.1",
+                "s=-",
+                "t=0 0",
+                "a=group:BUNDLE 0",
+                "a=msid-semantic: WMS *"
+            };
+
+            if (kind == "audio")
+            {
+                sdpLines.AddRange(new[]
+                {
+                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 103 104 9 0 8 106 105 13 110 112 113 126",
+                    "c=IN IP4 0.0.0.0",
+                    "a=rtcp:9 IN IP4 0.0.0.0",
+                    "a=ice-ufrag:UFRAG",
+                    "a=ice-pwd:PWD",
+                    "a=ice-options:trickle",
+                    "a=fingerprint:sha-256 FINGERPRINT",
+                    "a=setup:active",
+                    "a=mid:0",
+                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+                    "a=sendrecv",
+                    "a=rtcp-mux",
+                    "a=rtpmap:111 opus/48000/2",
+                    "a=rtcp-fb:111 transport-cc",
+                    "a=fmtp:111 minptime=10;useinbandfec=1",
+                    "a=rtpmap:103 ISAC/16000",
+                    "a=rtpmap:104 ISAC/32000"
+                });
+            }
+            else if (kind == "video")
+            {
+                sdpLines.AddRange(new[]
+                {
+                    "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 102",
+                    "c=IN IP4 0.0.0.0",
+                    "a=rtcp:9 IN IP4 0.0.0.0",
+                    "a=ice-ufrag:UFRAG",
+                    "a=ice-pwd:PWD",
+                    "a=ice-options:trickle",
+                    "a=fingerprint:sha-256 FINGERPRINT",
+                    "a=setup:active",
+                    "a=mid:0",
+                    "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset",
+                    "a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+                    "a=extmap:4 urn:3gpp:video-orientation",
+                    "a=sendrecv",
+                    "a=rtcp-mux",
+                    "a=rtcp-rsize",
+                    "a=rtpmap:96 VP8/90000",
+                    "a=rtcp-fb:96 goog-remb",
+                    "a=rtcp-fb:96 transport-cc",
+                    "a=rtcp-fb:96 ccm fir",
+                    "a=rtcp-fb:96 nack",
+                    "a=rtcp-fb:96 nack pli",
+                    "a=rtpmap:97 VP9/90000",
+                    "a=rtcp-fb:97 goog-remb",
+                    "a=rtcp-fb:97 transport-cc",
+                    "a=rtcp-fb:97 ccm fir",
+                    "a=rtcp-fb:97 nack",
+                    "a=rtcp-fb:97 nack pli"
+                });
+            }
+
+            return string.Join("\r\n", sdpLines) + "\r\n";
+        }
+
+        private string GenerateSdpOffer(string kind, string producerId)
+        {
+            var sdpLines = new List<string>
+            {
+                "v=0",
+                $"o=- {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} 2 IN IP4 127.0.0.1",
+                "s=-",
+                "t=0 0",
+                "a=group:BUNDLE 0",
+                "a=msid-semantic: WMS *"
+            };
+
+            if (kind == "audio")
+            {
+                sdpLines.AddRange(new[]
+                {
+                    "m=audio 9 UDP/TLS/RTP/SAVPF 111 103 104 9 0 8 106 105 13 110 112 113 126",
+                    "c=IN IP4 0.0.0.0",
+                    "a=rtcp:9 IN IP4 0.0.0.0",
+                    "a=ice-ufrag:UFRAG",
+                    "a=ice-pwd:PWD",
+                    "a=ice-options:trickle",
+                    "a=fingerprint:sha-256 FINGERPRINT",
+                    "a=setup:actpass",
+                    "a=mid:0",
+                    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+                    "a=recvonly",
+                    "a=rtcp-mux",
+                    "a=rtpmap:111 opus/48000/2",
+                    "a=rtcp-fb:111 transport-cc",
+                    "a=fmtp:111 minptime=10;useinbandfec=1"
+                });
+            }
+            else if (kind == "video")
+            {
+                sdpLines.AddRange(new[]
+                {
+                    "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99 100 101 102",
+                    "c=IN IP4 0.0.0.0",
+                    "a=rtcp:9 IN IP4 0.0.0.0",
+                    "a=ice-ufrag:UFRAG",
+                    "a=ice-pwd:PWD",
+                    "a=ice-options:trickle",
+                    "a=fingerprint:sha-256 FINGERPRINT",
+                    "a=setup:actpass",
+                    "a=mid:0",
+                    "a=extmap:2 urn:ietf:params:rtp-hdrext:toffset",
+                    "a=extmap:3 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+                    "a=recvonly",
+                    "a=rtcp-mux",
+                    "a=rtcp-rsize",
+                    "a=rtpmap:96 VP8/90000",
+                    "a=rtcp-fb:96 goog-remb",
+                    "a=rtcp-fb:96 transport-cc",
+                    "a=rtcp-fb:96 ccm fir",
+                    "a=rtcp-fb:96 nack",
+                    "a=rtcp-fb:96 nack pli"
+                });
+            }
+
+            return string.Join("\r\n", sdpLines) + "\r\n";
+        }
+
         public async Task SendOffer(string roomId, string toUserId, RTCSessionDescriptionInit offer)
         {
             try
@@ -742,7 +1107,7 @@ namespace wenu.Services
                     roomId = roomId
                 });
 
-                _logger.LogInformation("Offer sent from {From} to {To} in room {RoomId}", 
+                _logger.LogInformation("Offer sent from {From} to {To} in room {RoomId}",
                     Context.UserIdentifier, toUserId, roomId);
             }
             catch (Exception ex)
@@ -775,7 +1140,7 @@ namespace wenu.Services
                     answer = answer
                 });
 
-                _logger.LogInformation("Answer sent from {From} to {To} in room {RoomId}", 
+                _logger.LogInformation("Answer sent from {From} to {To} in room {RoomId}",
                     Context.UserIdentifier, toUserId, roomId);
             }
             catch (Exception ex)
@@ -808,7 +1173,7 @@ namespace wenu.Services
                     candidate = candidate
                 });
 
-                _logger.LogDebug("ICE candidate sent from {From} to {To} in room {RoomId}", 
+                _logger.LogDebug("ICE candidate sent from {From} to {To} in room {RoomId}",
                     Context.UserIdentifier, toUserId, roomId);
             }
             catch (Exception ex)
@@ -840,7 +1205,7 @@ namespace wenu.Services
                     });
                 }
 
-                _logger.LogInformation("Participant {Username} ({UserId}) joined room {RoomId} - notified host/co-hosts", 
+                _logger.LogInformation("Participant {Username} ({UserId}) joined room {RoomId} - notified host/co-hosts",
                     username, userId, roomId);
             }
             catch (Exception ex)
@@ -849,8 +1214,6 @@ namespace wenu.Services
                 await Clients.Caller.SendAsync("Error", new { message = "Failed to notify participant joined" });
             }
         }
-
-
     }
 
     public class StreamRoom
@@ -983,5 +1346,4 @@ namespace wenu.Services
         public int? SdpMLineIndex { get; set; }
         public string UsernameFragment { get; set; } = string.Empty;
     }
-
 }

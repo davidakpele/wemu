@@ -19,7 +19,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
-    options.MaximumReceiveMessageSize = 1024 * 1024 * 10; 
+    options.MaximumReceiveMessageSize = 1024 * 1024 * 10;
     options.StreamBufferCapacity = 100;
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
     options.HandshakeTimeout = TimeSpan.FromSeconds(15);
@@ -101,12 +101,13 @@ builder.Services.AddAuthentication(options =>
 builder.Services.Configure<FirewallSettings>(
     builder.Configuration.GetSection("FirewallSettings"));
 builder.Services.AddSingleton<AttackPatternDetector>();
+builder.Services.AddSingleton<MediaServer>();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 
 builder.Services.AddMemoryCache(options =>
 {
-    options.SizeLimit = 1024 * 1024 * 512; 
+    options.SizeLimit = 1024 * 1024 * 512;
     options.CompactionPercentage = 0.25;
     options.ExpirationScanFrequency = TimeSpan.FromMinutes(5);
 });
