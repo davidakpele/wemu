@@ -16,9 +16,24 @@ class StreamingClient {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' }
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' }
             ],
-            iceCandidatePoolSize: 10
+            iceCandidatePoolSize: 10,
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require',
+            iceTransportPolicy: 'all'
+        };
+        
+        // Audio constraints for better quality
+        this.audioConstraints = {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000,
+            channelCount: 1,
+            sampleSize: 16
         };
     }
 
@@ -191,8 +206,20 @@ class StreamingClient {
     // Get user media and start producing
     async startProducing(roomId, constraints = { audio: true, video: true }) {
         try {
+            // Enhanced constraints for better quality
+            const enhancedConstraints = {
+                audio: constraints.audio ? this.audioConstraints : false,
+                video: constraints.video ? {
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    frameRate: { ideal: 30, max: 30 }
+                } : false
+            };
+            
             // Get local media stream
-            this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            this.localStream = await navigator.mediaDevices.getUserMedia(enhancedConstraints);
+            
+            console.log('Got media stream with tracks:', this.localStream.getTracks().map(t => `${t.kind}: ${t.label}`));
             
             // Produce audio if enabled
             if (constraints.audio && this.localStream.getAudioTracks().length > 0) {
@@ -213,20 +240,22 @@ class StreamingClient {
 
     async produceTrack(roomId, kind, track) {
         try {
-            // Simply notify server that we're producing - no peer connection needed yet
-            const producerId = `producer-${kind}-${Date.now()}`;
-            
             // Store track for when consumers request it
             if (!this.producerTracks) {
                 this.producerTracks = new Map();
             }
             this.producerTracks.set(kind, track);
 
+            // Store the room ID
+            this.currentRoomId = roomId;
+
             // Notify server (no SDP needed, just announcing availability)
             await this.connection.invoke('ProduceMedia', roomId, kind, {
                 type: 'offer',
                 sdp: '' // Not needed for peer-to-peer
             });
+
+            console.log(`Stored ${kind} track for production`);
 
         } catch (err) {
             console.error(`Error producing ${kind}:`, err);
@@ -271,64 +300,123 @@ class StreamingClient {
         try {
             console.log(`Creating consumer for ${kind} from producer ${producerUserId}`);
             
-            // Create peer connection for this consumer
-            const pc = new RTCPeerConnection(this.configuration);
-
-            // Handle incoming tracks
-            pc.ontrack = (event) => {
-                console.log(`Received ${kind} track from producer ${producerUserId}`);
-                const stream = event.streams[0];
-                this.consumers.set(consumerId, stream);
-                this.onRemoteStream(stream, producerId, kind);
-            };
-
-            // Handle ICE candidates
-            pc.onicecandidate = (event) => {
-                if (event.candidate) {
-                    this.connection.invoke('SendIceCandidateToProducer', this.currentRoomId, producerUserId, {
-                        candidate: event.candidate.candidate,
-                        sdpMid: event.candidate.sdpMid,
-                        sdpMLineIndex: event.candidate.sdpMLineIndex
-                    }).catch(console.error);
-                }
-            };
-
-            // Create offer (consumer initiates connection)
-            const offer = await pc.createOffer({
-                offerToReceiveAudio: kind === 'audio',
-                offerToReceiveVideo: kind === 'video'
-            });
-            await pc.setLocalDescription(offer);
-
-            // Wait for ICE gathering
-            await new Promise((resolve) => {
-                if (pc.iceGatheringState === 'complete') {
-                    resolve();
-                } else {
-                    pc.addEventListener('icegatheringstatechange', () => {
-                        if (pc.iceGatheringState === 'complete') {
-                            resolve();
-                        }
-                    });
-                    // Timeout after 3 seconds
-                    setTimeout(resolve, 3000);
-                }
-            });
-
-            // Send offer to producer
-            await this.connection.invoke('SendOfferToProducer', this.currentRoomId, producerUserId, {
-                type: pc.localDescription.type,
-                sdp: pc.localDescription.sdp
-            });
-
-            // Store peer connection
-            this.peerConnections.set(`consumer-${consumerId}`, pc);
+            // Check if we already have a peer connection to this producer
+            let pc = this.consumerPcMapping?.get(producerUserId);
+            let isNewConnection = false;
             
-            // Store mapping for answer handling
-            if (!this.consumerPcMapping) {
-                this.consumerPcMapping = new Map();
+            if (!pc) {
+                // Create NEW peer connection for this producer
+                pc = new RTCPeerConnection(this.configuration);
+                isNewConnection = true;
+                console.log('Created NEW peer connection for producer', producerUserId);
+                
+                // Handle incoming tracks
+                pc.ontrack = (event) => {
+                    console.log(`✓ Received track from producer ${producerUserId}`, event.track.kind, event);
+                    const stream = event.streams[0];
+                    
+                    // Store or update the stream
+                    let existingVideoElement = document.getElementById(`remote-${producerUserId}`);
+                    if (existingVideoElement && existingVideoElement.srcObject) {
+                        // Add track to existing stream
+                        console.log('Adding track to existing stream');
+                        const existingStream = existingVideoElement.srcObject;
+                        existingStream.addTrack(event.track);
+                    } else {
+                        // New stream
+                        console.log('Creating new stream for producer');
+                        this.onRemoteStream(stream, producerUserId, event.track.kind);
+                    }
+                };
+
+                // Handle ICE candidates
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        console.log('Sending ICE candidate to producer');
+                        this.connection.invoke('SendIceCandidateToProducer', this.currentRoomId, producerUserId, {
+                            candidate: event.candidate.candidate,
+                            sdpMid: event.candidate.sdpMid,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex
+                        }).catch(console.error);
+                    }
+                };
+
+                // Monitor connection states
+                pc.onconnectionstatechange = () => {
+                    console.log(`Consumer connection state to ${producerUserId}:`, pc.connectionState);
+                };
+
+                pc.oniceconnectionstatechange = () => {
+                    console.log(`Consumer ICE state to ${producerUserId}:`, pc.iceConnectionState);
+                };
+                
+                // Store mapping
+                if (!this.consumerPcMapping) {
+                    this.consumerPcMapping = new Map();
+                }
+                this.consumerPcMapping.set(producerUserId, pc);
+                
+                // Initialize pending candidates queue
+                if (!this.pendingIceCandidates) {
+                    this.pendingIceCandidates = new Map();
+                }
+                this.pendingIceCandidates.set(producerUserId, {
+                    candidates: [],
+                    remoteDescriptionSet: false
+                });
+            } else {
+                console.log('Reusing existing peer connection for producer', producerUserId);
             }
-            this.consumerPcMapping.set(producerUserId, pc);
+
+            // Add transceiver for the requested media type
+            console.log(`Adding ${kind} transceiver`);
+            pc.addTransceiver(kind, { direction: 'recvonly' });
+
+            // Only create offer if this is a new connection or if we need to renegotiate
+            if (isNewConnection || pc.signalingState === 'stable') {
+                // Create offer to receive both audio and video
+                const offer = await pc.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: true
+                });
+                await pc.setLocalDescription(offer);
+                console.log(`Created offer for ${kind} (receives both audio and video)`);
+
+                // Wait for ICE gathering
+                await new Promise((resolve) => {
+                    if (pc.iceGatheringState === 'complete') {
+                        console.log('ICE gathering complete');
+                        resolve();
+                    } else {
+                        console.log('Waiting for ICE gathering...');
+                        const timeout = setTimeout(() => {
+                            console.log('ICE gathering timeout - proceeding');
+                            resolve();
+                        }, 3000);
+                        
+                        pc.addEventListener('icegatheringstatechange', () => {
+                            console.log('ICE gathering state:', pc.iceGatheringState);
+                            if (pc.iceGatheringState === 'complete') {
+                                clearTimeout(timeout);
+                                resolve();
+                            }
+                        });
+                    }
+                });
+
+                // Send offer to producer
+                console.log('Sending offer to producer...');
+                await this.connection.invoke('SendOfferToProducer', this.currentRoomId, producerUserId, {
+                    type: pc.localDescription.type,
+                    sdp: pc.localDescription.sdp
+                });
+            }
+
+            // Store consumer
+            this.peerConnections.set(`consumer-${consumerId}`, pc);
+            this.consumers.set(consumerId, { kind, producerUserId });
+            
+            console.log(`Consumer setup complete for ${kind} from producer ${producerUserId}`);
 
         } catch (err) {
             console.error('Error handling consumer creation:', err);
@@ -402,21 +490,35 @@ class StreamingClient {
         const { consumerUserId, consumerConnectionId, offer } = data;
         
         try {
-            console.log(`Received offer from consumer ${consumerUserId}`);
+            console.log(`Received offer from consumer ${consumerUserId}`, offer);
             
             // Create peer connection for this consumer
             const pc = new RTCPeerConnection(this.configuration);
 
-            // Add our local stream tracks to this connection
+            // Initialize pending ICE candidates queue for this consumer
+            if (!this.producerPendingIce) {
+                this.producerPendingIce = new Map();
+            }
+            this.producerPendingIce.set(consumerConnectionId, {
+                candidates: [],
+                remoteDescriptionSet: false
+            });
+
+            // CRITICAL: Add our local stream tracks to this connection
             if (this.localStream) {
+                console.log('Adding tracks to peer connection:', this.localStream.getTracks().length);
                 this.localStream.getTracks().forEach(track => {
+                    console.log(`Adding ${track.kind} track:`, track.id);
                     pc.addTrack(track, this.localStream);
                 });
+            } else {
+                console.error('No local stream available to send to consumer!');
             }
 
             // Handle ICE candidates
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
+                    console.log('Sending ICE candidate to consumer');
                     this.connection.invoke('SendIceCandidateToConsumer', this.currentRoomId, consumerConnectionId, {
                         candidate: event.candidate.candidate,
                         sdpMid: event.candidate.sdpMid,
@@ -425,24 +527,66 @@ class StreamingClient {
                 }
             };
 
+            // Monitor connection state
+            pc.onconnectionstatechange = () => {
+                console.log(`Connection state to consumer ${consumerConnectionId}:`, pc.connectionState);
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                console.log(`ICE connection state to consumer ${consumerConnectionId}:`, pc.iceConnectionState);
+            };
+
             // Set remote description (offer from consumer)
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            console.log('Set remote description (offer)');
+            
+            // Mark that remote description is set
+            const pending = this.producerPendingIce.get(consumerConnectionId);
+            if (pending) {
+                pending.remoteDescriptionSet = true;
+                
+                // Process any pending ICE candidates
+                console.log(`Processing ${pending.candidates.length} pending ICE candidates from consumer`);
+                for (const candidate of pending.candidates) {
+                    try {
+                        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                        console.log('Added pending ICE candidate from consumer');
+                    } catch (err) {
+                        console.error('Error adding pending ICE candidate:', err);
+                    }
+                }
+                pending.candidates = [];
+            }
 
             // Create answer
             const answer = await pc.createAnswer();
+            
+            // Optimize audio quality in answer
+            answer.sdp = this.setOpusPreferred(answer.sdp);
+            answer.sdp = this.setAudioBitrate(answer.sdp, 128);
+            
             await pc.setLocalDescription(answer);
+            console.log('Created and set local description (answer)');
 
             // Wait for ICE gathering
             await new Promise((resolve) => {
                 if (pc.iceGatheringState === 'complete') {
+                    console.log('ICE gathering already complete');
                     resolve();
                 } else {
+                    console.log('Waiting for ICE gathering...');
+                    const timeout = setTimeout(() => {
+                        console.log('ICE gathering timeout - proceeding anyway');
+                        resolve();
+                    }, 3000);
+                    
                     pc.addEventListener('icegatheringstatechange', () => {
+                        console.log('ICE gathering state:', pc.iceGatheringState);
                         if (pc.iceGatheringState === 'complete') {
+                            clearTimeout(timeout);
                             resolve();
                         }
                     });
-                    setTimeout(resolve, 3000);
                 }
             });
 
@@ -451,6 +595,7 @@ class StreamingClient {
                 type: pc.localDescription.type,
                 sdp: pc.localDescription.sdp
             });
+            console.log('Sent answer to consumer');
 
             // Store peer connection
             this.peerConnections.set(`to-consumer-${consumerConnectionId}`, pc);
@@ -470,6 +615,27 @@ class StreamingClient {
             if (pc) {
                 await pc.setRemoteDescription(new RTCSessionDescription(answer));
                 console.log('Answer set successfully');
+                
+                // Process any pending ICE candidates
+                if (this.pendingIceCandidates) {
+                    const pending = this.pendingIceCandidates.get(producerUserId);
+                    if (pending) {
+                        pending.remoteDescriptionSet = true;
+                        console.log(`Processing ${pending.candidates.length} pending ICE candidates`);
+                        
+                        for (const candidate of pending.candidates) {
+                            try {
+                                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                                console.log('Added pending ICE candidate');
+                            } catch (err) {
+                                console.error('Error adding pending ICE candidate:', err);
+                            }
+                        }
+                        
+                        // Clear the queue
+                        pending.candidates = [];
+                    }
+                }
             } else {
                 console.error('No peer connection found for producer:', producerUserId);
             }
@@ -484,7 +650,18 @@ class StreamingClient {
         try {
             const pc = this.peerConnections.get(`to-consumer-${consumerConnectionId}`);
             if (pc && candidate.candidate) {
-                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                // Check if remote description is set
+                const pending = this.producerPendingIce?.get(consumerConnectionId);
+                
+                if (pending && !pending.remoteDescriptionSet) {
+                    // Queue the candidate until remote description is set
+                    console.log('Queueing ICE candidate from consumer (waiting for remote description)');
+                    pending.candidates.push(candidate);
+                } else {
+                    // Remote description is set, add candidate immediately
+                    console.log('Adding ICE candidate from consumer');
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                }
             }
         } catch (err) {
             console.error('Error adding ICE candidate from consumer:', err);
@@ -497,7 +674,18 @@ class StreamingClient {
         try {
             const pc = this.consumerPcMapping?.get(producerUserId);
             if (pc && candidate.candidate) {
-                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                // Check if remote description is set
+                const pending = this.pendingIceCandidates?.get(producerUserId);
+                
+                if (pending && !pending.remoteDescriptionSet) {
+                    // Queue the candidate until remote description is set
+                    console.log('Queueing ICE candidate (waiting for remote description)');
+                    pending.candidates.push(candidate);
+                } else {
+                    // Remote description is set, add candidate immediately
+                    console.log('Adding ICE candidate from producer');
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                }
             }
         } catch (err) {
             console.error('Error adding ICE candidate from producer:', err);
@@ -571,6 +759,97 @@ class StreamingClient {
         if (this.connection) {
             this.connection.stop();
         }
+    }
+    
+    // SDP manipulation helpers for better audio quality
+    setOpusPreferred(sdp) {
+        const lines = sdp.split('\r\n');
+        const mLineIndex = lines.findIndex(line => line.startsWith('m=audio'));
+        if (mLineIndex === -1) return sdp;
+        
+        const codecPattern = /a=rtpmap:(\d+) opus\/48000/;
+        let opusPayloadType = null;
+        
+        for (let i = mLineIndex; i < lines.length; i++) {
+            const match = lines[i].match(codecPattern);
+            if (match) {
+                opusPayloadType = match[1];
+                break;
+            }
+            if (lines[i].startsWith('m=')) break;
+        }
+        
+        if (opusPayloadType) {
+            const mLine = lines[mLineIndex];
+            const parts = mLine.split(' ');
+            const codecs = parts.slice(3);
+            const newCodecs = [opusPayloadType, ...codecs.filter(c => c !== opusPayloadType)];
+            lines[mLineIndex] = parts.slice(0, 3).join(' ') + ' ' + newCodecs.join(' ');
+        }
+        
+        return lines.join('\r\n');
+    }
+    
+    setAudioBitrate(sdp, bitrate) {
+        const lines = sdp.split('\r\n');
+        let mLineIndex = -1;
+        
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].startsWith('m=audio')) {
+                mLineIndex = i;
+                break;
+            }
+        }
+        
+        if (mLineIndex === -1) return sdp;
+        
+        // Find opus payload type
+        let opusPayloadType = null;
+        for (let i = mLineIndex; i < lines.length; i++) {
+            const match = lines[i].match(/a=rtpmap:(\d+) opus\/48000/);
+            if (match) {
+                opusPayloadType = match[1];
+                break;
+            }
+            if (lines[i].startsWith('m=')) break;
+        }
+        
+        if (opusPayloadType) {
+            // Add or modify fmtp line for opus
+            let fmtpLineIndex = -1;
+            for (let i = mLineIndex; i < lines.length; i++) {
+                if (lines[i].startsWith(`a=fmtp:${opusPayloadType}`)) {
+                    fmtpLineIndex = i;
+                    break;
+                }
+                if (lines[i].startsWith('m=')) break;
+            }
+            
+            const bitrateKbps = bitrate * 1000;
+            if (fmtpLineIndex !== -1) {
+                // Modify existing fmtp line
+                if (!lines[fmtpLineIndex].includes('maxaveragebitrate')) {
+                    lines[fmtpLineIndex] += `;maxaveragebitrate=${bitrateKbps}`;
+                }
+                if (!lines[fmtpLineIndex].includes('stereo')) {
+                    lines[fmtpLineIndex] += ';stereo=0';
+                }
+                if (!lines[fmtpLineIndex].includes('useinbandfec')) {
+                    lines[fmtpLineIndex] += ';useinbandfec=1';
+                }
+            } else {
+                // Add new fmtp line after rtpmap
+                for (let i = mLineIndex; i < lines.length; i++) {
+                    if (lines[i].startsWith(`a=rtpmap:${opusPayloadType}`)) {
+                        lines.splice(i + 1, 0, `a=fmtp:${opusPayloadType} maxaveragebitrate=${bitrateKbps};stereo=0;useinbandfec=1`);
+                        break;
+                    }
+                    if (lines[i].startsWith('m=')) break;
+                }
+            }
+        }
+        
+        return lines.join('\r\n');
     }
 }
 
