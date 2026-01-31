@@ -10,18 +10,6 @@ using wenu.Validators;
 using FluentValidation;
 using FluentValidation.AspNetCore;
 
-// ───────────────────────────────────────────────────────────────────────────
-// PACKAGE NOTES
-// Remove these packages (no longer needed):
-//   - Microsoft.AspNetCore.Identity.EntityFrameworkCore
-//   - Microsoft.EntityFrameworkCore
-//   - Microsoft.EntityFrameworkCore.PostgreSQL  (Npgsql)
-//   - Microsoft.EntityFrameworkCore.Tools
-//
-// Add this package:
-//   dotnet add package BCrypt.Net-Next
-// ───────────────────────────────────────────────────────────────────────────
-
 var builder = WebApplication.CreateBuilder(args);
 
 // ─── SignalR ──────────────────────────────────────────────────────────────
@@ -96,7 +84,6 @@ builder.Services.AddAuthentication(options =>
         ClockSkew = TimeSpan.Zero
     };
 
-    // Allow SignalR clients to pass the token as a query-string parameter
     options.Events = new JwtBearerEvents
     {
         OnMessageReceived = context =>
@@ -151,12 +138,6 @@ var app = builder.Build();
 
 app.UseResponseCompression();
 app.UseCors("SignalRCors");
-
-// ─── Role seeding removed ─────────────────────────────────────────────────
-//     Roles are now just strings stored on each Users object (Users.Roles).
-//     No RoleManager, no IdentityRole, no database seed needed.
-//     If you need to check a role elsewhere, do:
-//         user.Roles.Contains("Admin")
 
 app.UseMiddleware<ExceptionMiddleware>();
 
