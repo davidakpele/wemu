@@ -3,15 +3,8 @@ using wenu.Entities;
 
 namespace wenu.Configs
 {
-    /// <summary>
-    /// Singleton, thread-safe, in-memory store for all non-user entities.
-    /// Replaces AppDbContext entirely — one ConcurrentDictionary per former DbSet.
-    /// Register as a Singleton so all services share the same data.
-    /// </summary>
     public class InMemoryDataStore
     {
-        // ─── Primary stores (id → entity) ─────────────────────────────
-
         public ConcurrentDictionary<int, LiveStream> LiveStreams { get; } = new();
         public ConcurrentDictionary<int, LiveStreamParticipant> LiveStreamParticipants { get; } = new();
         public ConcurrentDictionary<int, LiveStreamCoHost> LiveStreamCoHosts { get; } = new();
@@ -19,9 +12,7 @@ namespace wenu.Configs
         public ConcurrentDictionary<int, BlockedParticipant> BlockedParticipants { get; } = new();
         public ConcurrentDictionary<int, Message> Messages { get; } = new();
         public ConcurrentDictionary<int, UserRecord> UserRecords { get; } = new();
-
-        // ─── ID generators (one per entity) ───────────────────────────
-
+        
         private int _nextLiveStreamId;
         private int _nextParticipantId;
         private int _nextCoHostId;
