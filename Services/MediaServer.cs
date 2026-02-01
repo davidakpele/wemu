@@ -116,7 +116,7 @@ namespace wenu.Services
     {
         public string UserId { get; set; }
         public string ProducerId { get; set; }
-        public string Kind { get; set; } // "audio" or "video"
+        public string Kind { get; set; } 
         public RTCSessionDescriptionInit Offer { get; set; }
         public DateTime CreatedAt { get; set; }
         public bool IsActive { get; set; }

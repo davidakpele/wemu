@@ -52,7 +52,6 @@ namespace wenu.Services
                     ClaimValueTypes.Integer64)
             };
 
-            // Roles come directly from the user object now, no UserManager needed
             claims.AddRange(
                 user.Roles.Select(role => new Claim(ClaimTypes.Role, role))
             );
