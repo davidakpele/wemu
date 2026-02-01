@@ -65,7 +65,6 @@ namespace wenu.Services
                     ConnectionId = connectionId,
                     CoHosts = new List<CoHostInfo>()
                 },
-                // *** NEW: Store original host details for tracking ***
                 OriginalHostId = userId,
                 OriginalHostUsername = username,
                 IsHostPresent = true,
@@ -185,7 +184,7 @@ namespace wenu.Services
                 return;
             }
 
-            // *** Check if user is blocked ***
+            // Check if user is blocked
             if (room.BlockedUsers != null && room.BlockedUsers.Contains(userId))
             {
                 await Clients.Caller.SendAsync("Error", new { message = "You have been blocked from this stream" });
@@ -194,7 +193,38 @@ namespace wenu.Services
                 return;
             }
 
-            // *** NEW: Check if this is the original host rejoining ***
+            // *** NEW: Handle duplicate user - remove existing connection with same userId ***
+            var existingParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Id == userId.ToString());
+            if (existingParticipant != null)
+            {
+                _logger.LogInformation("Removing duplicate user {Username} ({UserId}) from room {RoomId} - old connection: {OldConnection}", 
+                    username, userId, roomId, existingParticipant.ConnectionId);
+                
+                // Remove from participants list
+                room.Participants.UsersList.Remove(existingParticipant);
+                room.CurrentViewers--;
+                
+                // Remove from connections
+                _streamConnections.TryRemove(existingParticipant.ConnectionId, out _);
+                
+                // Remove from SignalR group
+                await Groups.RemoveFromGroupAsync(existingParticipant.ConnectionId, roomId);
+                
+                // Clean up media
+                _mediaServer.RemoveProducer(roomId, userId.ToString());
+                _mediaServer.RemoveAllConsumersForUser(roomId, userId.ToString());
+                
+                // Remove from co-hosts if applicable
+                var existingCoHost = room.Host.CoHosts.FirstOrDefault(c => c.Id == userId.ToString());
+                if (existingCoHost != null)
+                {
+                    room.Host.CoHosts.Remove(existingCoHost);
+                }
+                
+                _logger.LogInformation("Duplicate user {Username} removed successfully", username);
+            }
+
+            // Check if this is the original host rejoining
             bool isOriginalHost = userId == room.OriginalHostId;
             string userRole = "viewer";
 
@@ -428,7 +458,8 @@ namespace wenu.Services
                 userId = userId,
                 username = connection.Username,
                 producerId = producerId,
-                kind = kind
+                kind = kind,
+                isCoHost = connection.Role == "co-host"
             });
 
             _logger.LogInformation("User {Username} started producing {Kind} in room {RoomId}", 
@@ -814,6 +845,13 @@ namespace wenu.Services
             {
                 targetConnection.Role = "viewer";
                 _mediaServer.RemoveProducer(roomId, targetConnection.UserId.ToString());
+                
+                // Notify clients to remove co-host media
+                await Clients.Group(roomId).SendAsync("CoHostMediaRemoved", new
+                {
+                    userId = targetConnection.UserId.ToString(),
+                    username = targetUsername
+                });
             }
 
             var message = new ChatMessage
@@ -879,6 +917,13 @@ namespace wenu.Services
 
             connection.Role = "viewer";
             _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
+            
+            // Notify clients to remove co-host media
+            await Clients.Group(roomId).SendAsync("CoHostMediaRemoved", new
+            {
+                userId = connection.UserId.ToString(),
+                username = connection.Username
+            });
 
             var message = new ChatMessage
             {
@@ -935,6 +980,13 @@ namespace wenu.Services
             if (coHost != null)
             {
                 room.Host.CoHosts.Remove(coHost);
+                
+                // Notify clients to remove co-host media
+                await Clients.Group(roomId).SendAsync("CoHostMediaRemoved", new
+                {
+                    userId = connection.UserId.ToString(),
+                    username = connection.Username
+                });
             }
 
             _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
@@ -944,16 +996,14 @@ namespace wenu.Services
 
             bool wasHost = connection.Role == "host";
 
-            // *** NEW: Handle host leaving - start 30-minute auto-close timer ***
             if (wasHost && isHostLeaving)
             {
                 room.IsHostPresent = false;
-                room.Host.ConnectionId = string.Empty; // Clear connection ID but keep host info
+                room.Host.ConnectionId = string.Empty;
                 
                 _logger.LogInformation("Host {Username} left stream {RoomId} - starting 30-minute auto-close timer", 
                     connection.Username, roomId);
 
-                // Start 30-minute countdown
                 var cts = new CancellationTokenSource();
                 _autoCloseTimers[roomId] = cts;
 
@@ -963,7 +1013,6 @@ namespace wenu.Services
                     {
                         await Task.Delay(TimeSpan.FromMinutes(30), cts.Token);
                         
-                        // If we reach here, 30 minutes passed without host rejoining
                         if (_streamRooms.TryGetValue(roomId, out var roomToClose))
                         {
                             _logger.LogInformation("Auto-closing stream {RoomId} - host did not return within 30 minutes", roomId);
@@ -981,7 +1030,6 @@ namespace wenu.Services
                                 reason = "host_timeout"
                             });
                             
-                            // Clean up all connections
                             var participantConnections = _streamConnections.Values
                                 .Where(c => c.RoomId == roomId)
                                 .ToList();
@@ -998,7 +1046,6 @@ namespace wenu.Services
                     }
                     catch (TaskCanceledException)
                     {
-                        // Timer was cancelled - host rejoined
                         _logger.LogInformation("Auto-close timer cancelled for room {RoomId}", roomId);
                     }
                     finally
@@ -1064,7 +1111,6 @@ namespace wenu.Services
                 return;
             }
 
-            // Cancel any pending auto-close timer
             if (_autoCloseTimers.TryRemove(roomId, out var cts))
             {
                 cts.Cancel();
@@ -1177,7 +1223,6 @@ namespace wenu.Services
             {
                 if (connection.Role == "host")
                 {
-                    // Don't auto-end, just mark host as left
                     await LeaveStream(connection.RoomId, isHostLeaving: true);
                 }
                 else
@@ -1359,7 +1404,6 @@ namespace wenu.Services
         public DateTime? EndTime { get; set; }
         public int CurrentViewers { get; set; }
         public HostInfo Host { get; set; } = new();
-        // *** NEW: Track original host ***
         public int OriginalHostId { get; set; }
         public string OriginalHostUsername { get; set; } = string.Empty;
         public bool IsHostPresent { get; set; }
