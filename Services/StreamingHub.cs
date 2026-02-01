@@ -97,7 +97,8 @@ namespace wenu.Services
                 {
                     ReactionsEnabled = true,
                     Events = new List<StreamEvent>()
-                }
+                },
+                BlockedUsers = new List<int>() // Initialize blocked users list
             };
 
             _streamRooms[roomId] = streamRoom;
@@ -173,6 +174,15 @@ namespace wenu.Services
             if (!_streamRooms.TryGetValue(roomId, out var room))
             {
                 await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            // *** CRITICAL FIX: Check if user is blocked before allowing them to join ***
+            if (room.BlockedUsers != null && room.BlockedUsers.Contains(userId))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "You have been blocked from this stream" });
+                _logger.LogWarning("Blocked user {Username} ({UserId}) attempted to join room {RoomId}", 
+                    username, userId, roomId);
                 return;
             }
 
