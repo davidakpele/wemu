@@ -167,7 +167,7 @@ namespace wenu.Services
             _logger.LogInformation("User {Username} started stream {RoomId}", username, roomId);
         }
 
-        public async Task JoinStream(string roomId, int userId, string username)
+        public async Task JoinStream(string roomId, int userId, string username, bool isRejoiningAsHost = false)
         {
             var connectionId = Context.ConnectionId;
 
@@ -177,7 +177,7 @@ namespace wenu.Services
                 return;
             }
 
-            // *** CRITICAL FIX: Check if user is blocked before allowing them to join ***
+            // *** Check if user is blocked ***
             if (room.BlockedUsers != null && room.BlockedUsers.Contains(userId))
             {
                 await Clients.Caller.SendAsync("Error", new { message = "You have been blocked from this stream" });
@@ -186,6 +186,116 @@ namespace wenu.Services
                 return;
             }
 
+            // *** NEW: Check if user is the original host rejoining ***
+            if (isRejoiningAsHost && room.Host.Id == userId)
+            {
+                _logger.LogInformation("Original host {Username} ({UserId}) is rejoining stream {RoomId}", 
+                    username, userId, roomId);
+                
+                // Restore host connection
+                var hostConnection = new StreamConnection
+                {
+                    ConnectionId = connectionId,
+                    UserId = userId,
+                    Username = username,
+                    RoomId = roomId,
+                    Role = "host",
+                    JoinedAt = DateTime.UtcNow
+                };
+                
+                _streamConnections[connectionId] = hostConnection;
+                room.Host.ConnectionId = connectionId;
+                
+                // Add to SignalR group
+                await Groups.AddToGroupAsync(connectionId, roomId);
+                
+                // Add back to participants list as host
+                var hostParticipant = new ParticipantInfo
+                {
+                    Id = userId.ToString(),
+                    Username = username,
+                    Role = "host",
+                    ConnectionId = connectionId
+                };
+                
+                room.Participants.UsersList.Add(hostParticipant);
+                room.Participants.TotalMembers = room.Participants.UsersList.Count;
+                room.CurrentViewers++;
+                
+                // Notify everyone that host has rejoined
+                await Clients.Group(roomId).SendAsync("HostRejoined", new
+                {
+                    userId = userId,
+                    username = username,
+                    message = $"{username} (host) has rejoined the stream"
+                });
+                
+                var updatedParticipantsList = room.Participants.UsersList.Select(p => new
+                {
+                    username = p.Username,
+                    id = p.Id,
+                    role = p.Role
+                }).ToList();
+                
+                var existingProducers = _mediaServer.GetProducersInRoom(roomId, userId.ToString());
+                
+                // Send JoinedStream with host role
+                var streamData = new
+                {
+                    data = new
+                    {
+                        stream = new
+                        {
+                            roomid = room.RoomId,
+                            title = room.Title,
+                            description = room.Description,
+                            category = room.Category,
+                            visibility = room.Visibility
+                        },
+                        status = new
+                        {
+                            state = room.State,
+                            start_time = room.StartTime,
+                            end_time = room.EndTime,
+                            current_viewers = room.CurrentViewers
+                        },
+                        userdetails = new
+                        {
+                            username = username,
+                            id = userId,
+                            role = "host" // *** IMPORTANT: Set role as host ***
+                        },
+                        host = new
+                        {
+                            id = room.Host.Id,
+                            username = room.Host.Username,
+                            coHosts = room.Host.CoHosts
+                        },
+                        participants = new
+                        {
+                            users_list = updatedParticipantsList,
+                            total_members = room.Participants.TotalMembers
+                        },
+                        media_settings = room.MediaSettings,
+                        permissions = room.Permissions,
+                        message_room = room.MessageRoom,
+                        realtime = room.Realtime,
+                        existing_producers = existingProducers.Select(p => new
+                        {
+                            userId = p.UserId,
+                            producerId = p.ProducerId,
+                            kind = p.Kind
+                        }).ToList()
+                    }
+                };
+
+                await Clients.Caller.SendAsync("JoinedStream", streamData);
+                
+                _logger.LogInformation("Host {Username} successfully rejoined stream {RoomId}", username, roomId);
+                return; // Exit early - host rejoin complete
+            }
+
+            // *** EXISTING CODE FOR REGULAR USER JOIN ***
             var participant = new ParticipantInfo
             {
                 Id = userId.ToString(),
@@ -248,7 +358,7 @@ namespace wenu.Services
 
             room.MessageRoom.Messages.Add(joinMessage);
 
-            var updatedParticipantsList = room.Participants.UsersList.Select(p => new
+            var updatedParticipantsList2 = room.Participants.UsersList.Select(p => new
             {
                 username = p.Username,
                 id = p.Id,
@@ -262,12 +372,12 @@ namespace wenu.Services
                 message = $"{username} just joined the room",
                 current_viewers = room.CurrentViewers,
                 total_members = room.Participants.TotalMembers,
-                participants = updatedParticipantsList
+                participants = updatedParticipantsList2
             });
 
-            var existingProducers = _mediaServer.GetProducersInRoom(roomId, userId.ToString());
+            var existingProducers2 = _mediaServer.GetProducersInRoom(roomId, userId.ToString());
             
-            var streamData = new
+            var streamData2 = new
             {
                 data = new
                 {
@@ -300,14 +410,14 @@ namespace wenu.Services
                     },
                     participants = new
                     {
-                        users_list = updatedParticipantsList,
+                        users_list = updatedParticipantsList2,
                         total_members = room.Participants.TotalMembers
                     },
                     media_settings = room.MediaSettings,
                     permissions = room.Permissions,
                     message_room = room.MessageRoom,
                     realtime = room.Realtime,
-                    existing_producers = existingProducers.Select(p => new
+                    existing_producers = existingProducers2.Select(p => new
                     {
                         userId = p.UserId,
                         producerId = p.ProducerId,
@@ -316,9 +426,9 @@ namespace wenu.Services
                 }
             };
 
-            await Clients.Caller.SendAsync("JoinedStream", streamData);
+            await Clients.Caller.SendAsync("JoinedStream", streamData2);
 
-            foreach (var producer in existingProducers)
+            foreach (var producer in existingProducers2)
             {
                 await Clients.Caller.SendAsync("NewProducer", new
                 {
@@ -904,7 +1014,7 @@ namespace wenu.Services
                 connection.Username, roomId);
         }
 
-        public async Task LeaveStream(string roomId)
+        public async Task LeaveStream(string roomId, bool isHostLeaving = false)
         {
             var connectionId = Context.ConnectionId;
 
@@ -956,17 +1066,35 @@ namespace wenu.Services
                 role = p.Role
             }).ToList();
 
+            // ***  Check if host is leaving (not ending stream) ***
+            bool wasHost = connection.Role == "host";
+            
             await Clients.Group(roomId).SendAsync("UserLeftStream", new
             {
                 username = connection.Username,
                 userId = connection.UserId,
-                message = $"{connection.Username} left the room",
+                message = wasHost 
+                    ? $"{connection.Username} (host) left the room" 
+                    : $"{connection.Username} left the room",
                 current_viewers = room.CurrentViewers,
                 total_members = room.Participants.TotalMembers,
-                participants = updatedParticipantsList
+                participants = updatedParticipantsList,
+                wasHost = wasHost, 
+                hostRejoined = false
             });
 
-            _logger.LogInformation("User {Username} left stream {RoomId}", connection.Username, roomId);
+            if (wasHost && isHostLeaving)
+            {
+                _logger.LogInformation("Host {Username} left stream {RoomId} - stream will auto-end in 30 minutes if host doesn't return", 
+                    connection.Username, roomId);
+                
+                // Note: The 30-minute timer is handled on the client side
+                // The stream will auto-end via EndStream call if host doesn't rejoin
+            }
+            else
+            {
+                _logger.LogInformation("User {Username} left stream {RoomId}", connection.Username, roomId);
+            }
         }
 
         public async Task EndStream(string roomId)
@@ -1027,7 +1155,7 @@ namespace wenu.Services
                 {
                     Id = connection.UserId.ToString(),
                     Username = connection.Username,
-                    Role = connection.Role
+                    Role = connection.Role 
                 },
                 Type = "text",
                 Content = message,
@@ -1039,7 +1167,7 @@ namespace wenu.Services
             await Clients.Group(roomId).SendAsync("ReceiveStreamMessage", new
             {
                 message_id = chatMessage.MessageId,
-                sender = chatMessage.Sender,
+                sender = chatMessage.Sender, 
                 type = chatMessage.Type,
                 content = chatMessage.Content,
                 timestamp = chatMessage.Timestamp
@@ -1242,7 +1370,6 @@ namespace wenu.Services
             }
         }
     
-
         public async Task RemoveUser(string roomId, string targetUsername, int targetUserId)
         {
             var connectionId = Context.ConnectionId;
