@@ -297,7 +297,7 @@ namespace wenu.Services
                 await Clients.Caller.SendAsync("NewProducer", new
                 {
                     userId = producer.UserId,
-                    username = producer.UserId, // Will be looked up by client
+                    username = producer.UserId, 
                     producerId = producer.ProducerId,
                     kind = producer.Kind
                 });
