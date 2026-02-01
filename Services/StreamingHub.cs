@@ -1,3 +1,5 @@
+// src/Services/StreamingHub.cs
+
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -641,6 +643,13 @@ namespace wenu.Services
                 message = $"{hostConnection.Username} invited you to be a co-host"
             });
 
+            await Clients.Client(targetParticipant.ConnectionId).SendAsync("CoHostInvite", new
+            {
+                roomId = roomId,
+                hostUsername = hostConnection.Username,
+                message = $"{hostConnection.Username} invited you to be a co-host"
+            });
+
             _logger.LogInformation("Host {Host} invited {User} to be co-host in room {RoomId}", 
                 hostConnection.Username, targetUsername, roomId);
         }
@@ -702,6 +711,19 @@ namespace wenu.Services
                 userId = connection.UserId,
                 message = $"{connection.Username} is now invited to co-host",
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
+            });
+
+            await Clients.Group(roomId).SendAsync("CoHostAdded", new
+            {
+                username = connection.Username,
+                userId = connection.UserId,
+                message = $"{connection.Username} is now a co-host",
+                coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id }),
+                participants = room.Participants.UsersList.Select(p => new { 
+                    username = p.Username, 
+                    id = p.Id, 
+                    role = p.Role 
+                }).ToList()
             });
 
             _logger.LogInformation("User {Username} accepted co-host invite in room {RoomId}", 
@@ -783,6 +805,19 @@ namespace wenu.Services
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
             });
 
+            await Clients.Group(roomId).SendAsync("CoHostRemoved", new
+            {
+                username = targetUsername,
+                userId = targetUserId,
+                message = $"{targetUsername} is no longer a co-host",
+                coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id }),
+                participants = room.Participants.UsersList.Select(p => new { 
+                    username = p.Username, 
+                    id = p.Id, 
+                    role = p.Role 
+                }).ToList()
+            });
+
             _logger.LogInformation("Host {Host} removed {User} from co-host in room {RoomId}", 
                 hostConnection.Username, targetUsername, roomId);
         }
@@ -840,6 +875,19 @@ namespace wenu.Services
                 userId = connection.UserId,
                 message = $"{connection.Username} left co-host and returned to participant",
                 coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id })
+            });
+
+            await Clients.Group(roomId).SendAsync("CoHostLeft", new
+            {
+                username = connection.Username,
+                userId = connection.UserId,
+                message = $"{connection.Username} left co-host and returned to viewer",
+                coHosts = room.Host.CoHosts.Select(c => new { username = c.Username, id = c.Id }),
+                participants = room.Participants.UsersList.Select(p => new { 
+                    username = p.Username, 
+                    id = p.Id, 
+                    role = p.Role 
+                }).ToList()
             });
 
             _logger.LogInformation("User {Username} left co-host role in room {RoomId}", 
@@ -1183,6 +1231,171 @@ namespace wenu.Services
                 await Clients.Caller.SendAsync("Error", new { message = "Failed to notify participant joined" });
             }
         }
+    
+
+        public async Task RemoveUser(string roomId, string targetUsername, int targetUserId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var hostConnection) || hostConnection.Role != "host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host can remove users" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var targetParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Username == targetUsername);
+            if (targetParticipant == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "User not found in stream" });
+                return;
+            }
+
+            // Remove from participants list
+            room.Participants.UsersList.Remove(targetParticipant);
+            room.Participants.TotalMembers = room.Participants.UsersList.Count;
+            room.CurrentViewers--;
+
+            // Remove their connection
+            _streamConnections.TryRemove(targetParticipant.ConnectionId, out _);
+
+            // Remove their media
+            _mediaServer.RemoveProducer(roomId, targetUserId.ToString());
+            _mediaServer.RemoveAllConsumersForUser(roomId, targetUserId.ToString());
+
+            // Remove from SignalR group
+            await Groups.RemoveFromGroupAsync(targetParticipant.ConnectionId, roomId);
+
+            var message = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = targetUserId.ToString(),
+                    Username = targetUsername,
+                    Role = "viewer"
+                },
+                Type = "system",
+                Content = $"{targetUsername} was removed from the stream",
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(message);
+
+            // Notify the removed user
+            await Clients.Client(targetParticipant.ConnectionId).SendAsync("UserRemoved", new
+            {
+                userId = targetUserId,
+                username = targetUsername,
+                message = "You have been removed from the stream"
+            });
+
+            // Notify everyone else
+            await Clients.Group(roomId).SendAsync("UserLeftStream", new
+            {
+                username = targetUsername,
+                userId = targetUserId,
+                message = $"{targetUsername} was removed from the stream",
+                current_viewers = room.CurrentViewers,
+                total_members = room.Participants.TotalMembers,
+                participants = room.Participants.UsersList.Select(p => new { username = p.Username, id = p.Id, role = p.Role }).ToList()
+            });
+
+            _logger.LogInformation("Host {Host} removed user {User} from room {RoomId}", 
+                hostConnection.Username, targetUsername, roomId);
+        }
+
+        public async Task BlockUser(string roomId, string targetUsername, int targetUserId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var hostConnection) || hostConnection.Role != "host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host can block users" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            // Add to blocked list
+            if (room.BlockedUsers == null)
+            {
+                room.BlockedUsers = new List<int>();
+            }
+            
+            if (!room.BlockedUsers.Contains(targetUserId))
+            {
+                room.BlockedUsers.Add(targetUserId);
+            }
+
+            var targetParticipant = room.Participants.UsersList.FirstOrDefault(p => p.Username == targetUsername);
+            if (targetParticipant != null)
+            {
+                // Remove from participants list
+                room.Participants.UsersList.Remove(targetParticipant);
+                room.Participants.TotalMembers = room.Participants.UsersList.Count;
+                room.CurrentViewers--;
+
+                // Remove their connection
+                _streamConnections.TryRemove(targetParticipant.ConnectionId, out _);
+
+                // Remove their media
+                _mediaServer.RemoveProducer(roomId, targetUserId.ToString());
+                _mediaServer.RemoveAllConsumersForUser(roomId, targetUserId.ToString());
+
+                // Remove from SignalR group
+                await Groups.RemoveFromGroupAsync(targetParticipant.ConnectionId, roomId);
+
+                // Notify the blocked user
+                await Clients.Client(targetParticipant.ConnectionId).SendAsync("UserBlocked", new
+                {
+                    userId = targetUserId,
+                    username = targetUsername,
+                    message = "You have been blocked from this stream"
+                });
+            }
+
+            var message = new ChatMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                Sender = new MessageSender
+                {
+                    Id = targetUserId.ToString(),
+                    Username = targetUsername,
+                    Role = "viewer"
+                },
+                Type = "system",
+                Content = $"{targetUsername} was blocked from the stream",
+                Timestamp = DateTime.UtcNow
+            };
+
+            room.MessageRoom.Messages.Add(message);
+
+            // Notify everyone else
+            await Clients.Group(roomId).SendAsync("UserLeftStream", new
+            {
+                username = targetUsername,
+                userId = targetUserId,
+                message = $"{targetUsername} was blocked from the stream",
+                current_viewers = room.CurrentViewers,
+                total_members = room.Participants.TotalMembers,
+                participants = room.Participants.UsersList.Select(p => new { username = p.Username, id = p.Id, role = p.Role }).ToList()
+            });
+
+            _logger.LogInformation("Host {Host} blocked user {User} from room {RoomId}", 
+                hostConnection.Username, targetUsername, roomId);
+        }
+
+
     }
 
     public class StreamRoom
@@ -1202,6 +1415,7 @@ namespace wenu.Services
         public StreamPermissions Permissions { get; set; } = new();
         public MessageRoom MessageRoom { get; set; } = new();
         public RealtimeInfo Realtime { get; set; } = new();
+        public List<int> BlockedUsers { get; set; } = new List<int>();
     }
 
     public class StreamConnection
