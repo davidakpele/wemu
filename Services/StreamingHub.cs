@@ -15,10 +15,12 @@ namespace wenu.Services
         private static readonly ConcurrentDictionary<string, StreamRoom> _streamRooms = new();
         private static readonly ConcurrentDictionary<string, StreamConnection> _streamConnections = new();
         private readonly ILogger<StreamingHub> _logger;
+        private readonly MediaServer _mediaServer;
 
-        public StreamingHub(ILogger<StreamingHub> logger)
+        public StreamingHub(ILogger<StreamingHub> logger, MediaServer mediaServer)
         {
             _logger = logger;
+            _mediaServer = mediaServer;
         }
 
         public async Task StartStream(string username, int userId, string title, string description, string category, string visibility, string type)
@@ -96,6 +98,8 @@ namespace wenu.Services
             _streamConnections[connectionId] = hostConnection;
 
             await Groups.AddToGroupAsync(connectionId, roomId);
+
+            _mediaServer.GetOrCreateRoom(roomId);
 
             var response = new
             {
@@ -217,7 +221,6 @@ namespace wenu.Services
 
             room.MessageRoom.Messages.Add(joinMessage);
 
-            // Send updated participant list to ALL users in the room
             var updatedParticipantsList = room.Participants.UsersList.Select(p => new
             {
                 username = p.Username,
@@ -235,6 +238,8 @@ namespace wenu.Services
                 participants = updatedParticipantsList
             });
 
+            var existingProducers = _mediaServer.GetProducersInRoom(roomId, userId.ToString());
+            
             var streamData = new
             {
                 data = new
@@ -274,13 +279,328 @@ namespace wenu.Services
                     media_settings = room.MediaSettings,
                     permissions = room.Permissions,
                     message_room = room.MessageRoom,
-                    realtime = room.Realtime
+                    realtime = room.Realtime,
+                    existing_producers = existingProducers.Select(p => new
+                    {
+                        userId = p.UserId,
+                        producerId = p.ProducerId,
+                        kind = p.Kind
+                    }).ToList()
                 }
             };
 
             await Clients.Caller.SendAsync("JoinedStream", streamData);
 
+            // Automatically notify viewer about existing producers
+            foreach (var producer in existingProducers)
+            {
+                await Clients.Caller.SendAsync("NewProducer", new
+                {
+                    userId = producer.UserId,
+                    username = producer.UserId, 
+                    producerId = producer.ProducerId,
+                    kind = producer.Kind
+                });
+            }
+
             _logger.LogInformation("User {Username} joined stream {RoomId}", username, roomId);
+        }
+
+        public async Task ProduceMedia(string roomId, string kind, RTCSessionDescriptionInit offer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (connection.Role != "host" && connection.Role != "co-host")
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Only host or co-host can produce media" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var producerId = Guid.NewGuid().ToString();
+            var userId = connection.UserId.ToString();
+
+            var producer = new MediaProducer
+            {
+                UserId = userId,
+                ProducerId = producerId,
+                Kind = kind,
+                Offer = offer,
+                CreatedAt = DateTime.UtcNow,
+                IsActive = true,
+                TrackSettings = new MediaTrackSettings
+                {
+                    TrackId = Guid.NewGuid().ToString(),
+                    Enabled = true,
+                    MaxBitrate = kind == "video" ? 2500000 : 128000,
+                    Resolution = kind == "video" ? "1280x720" : null,
+                    FrameRate = kind == "video" ? 30 : null
+                }
+            };
+
+            _mediaServer.AddProducer(roomId, userId, producer);
+
+            // Notify caller that producer is created (no answer needed, peer-to-peer handles it)
+            await Clients.Caller.SendAsync("ProducerCreated", new
+            {
+                producerId = producerId,
+                kind = kind
+            });
+
+            // Notify all other participants about new producer
+            await Clients.OthersInGroup(roomId).SendAsync("NewProducer", new
+            {
+                userId = userId,
+                username = connection.Username,
+                producerId = producerId,
+                kind = kind
+            });
+
+            _logger.LogInformation("User {Username} started producing {Kind} in room {RoomId}", 
+                connection.Username, kind, roomId);
+        }
+
+        public async Task ConsumeMedia(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            var producers = _mediaServer.GetProducersInRoom(roomId);
+            var producer = producers.FirstOrDefault(p => p.ProducerId == producerId);
+
+            if (producer == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Producer not found" });
+                return;
+            }
+
+            var consumerId = Guid.NewGuid().ToString();
+            var userId = connection.UserId.ToString();
+
+            var consumer = new MediaConsumer
+            {
+                ConsumerId = consumerId,
+                UserId = userId,
+                ProducerId = producerId,
+                Kind = producer.Kind,
+                CreatedAt = DateTime.UtcNow,
+                IsActive = true
+            };
+
+            _mediaServer.AddConsumer(roomId, userId, producerId, consumer);
+
+            // Notify the consumer - they need to create offer to producer
+            await Clients.Caller.SendAsync("ConsumerCreated", new
+            {
+                consumerId = consumerId,
+                producerId = producerId,
+                producerUserId = producer.UserId,
+                kind = producer.Kind
+            });
+
+            _logger.LogInformation("User {Username} consuming {Kind} from producer {ProducerId} in room {RoomId}", 
+                connection.Username, producer.Kind, producerId, roomId);
+        }
+
+        public async Task SendOfferToProducer(string roomId, string producerUserId, RTCSessionDescriptionInit offer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            if (!_streamRooms.TryGetValue(roomId, out var room))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Stream room not found" });
+                return;
+            }
+
+            // Find producer's connection
+            var producerConnection = _streamConnections.Values.FirstOrDefault(c => c.UserId.ToString() == producerUserId && c.RoomId == roomId);
+            
+            if (producerConnection == null)
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Producer not found" });
+                return;
+            }
+
+            // Send offer to producer
+            await Clients.Client(producerConnection.ConnectionId).SendAsync("ReceiveOfferFromConsumer", new
+            {
+                consumerUserId = connection.UserId.ToString(),
+                consumerConnectionId = connectionId,
+                offer = offer
+            });
+
+            _logger.LogInformation("Offer sent from consumer {Consumer} to producer {Producer}", 
+                connection.Username, producerUserId);
+        }
+
+        public async Task SendAnswerToConsumer(string roomId, string consumerConnectionId, RTCSessionDescriptionInit answer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            // Send answer back to consumer
+            await Clients.Client(consumerConnectionId).SendAsync("ReceiveAnswerFromProducer", new
+            {
+                producerUserId = connection.UserId.ToString(),
+                answer = answer
+            });
+
+            _logger.LogInformation("Answer sent from producer {Producer} to consumer", connection.Username);
+        }
+
+        public async Task SendIceCandidateToProducer(string roomId, string producerUserId, RTCIceCandidateInit candidate)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            var producerConnection = _streamConnections.Values.FirstOrDefault(c => c.UserId.ToString() == producerUserId && c.RoomId == roomId);
+            
+            if (producerConnection == null)
+                return;
+
+            await Clients.Client(producerConnection.ConnectionId).SendAsync("ReceiveIceCandidateFromConsumer", new
+            {
+                consumerConnectionId = connectionId,
+                candidate = candidate
+            });
+
+            _logger.LogDebug("ICE candidate sent from consumer to producer {Producer}", producerUserId);
+        }
+
+        public async Task SendIceCandidateToConsumer(string roomId, string consumerConnectionId, RTCIceCandidateInit candidate)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            await Clients.Client(consumerConnectionId).SendAsync("ReceiveIceCandidateFromProducer", new
+            {
+                producerUserId = connection.UserId.ToString(),
+                candidate = candidate
+            });
+
+            _logger.LogDebug("ICE candidate sent from producer {Producer} to consumer", connection.Username);
+        }
+
+        public async Task ConsumerAnswer(string roomId, string consumerId, RTCSessionDescriptionInit answer)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+            {
+                await Clients.Caller.SendAsync("Error", new { message = "Connection not found" });
+                return;
+            }
+
+            await Clients.Caller.SendAsync("ConsumerAnswerReceived", new
+            {
+                consumerId = consumerId,
+                success = true
+            });
+
+            _logger.LogDebug("Consumer answer received for {ConsumerId} in room {RoomId}", consumerId, roomId);
+        }
+
+        public async Task PauseProducer(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            var producer = _mediaServer.GetProducer(roomId, connection.UserId.ToString());
+            
+            if (producer != null && producer.ProducerId == producerId)
+            {
+                producer.IsActive = false;
+
+                await Clients.Group(roomId).SendAsync("ProducerPaused", new
+                {
+                    userId = connection.UserId.ToString(),
+                    producerId = producerId,
+                    kind = producer.Kind
+                });
+
+                _logger.LogInformation("Producer {ProducerId} paused in room {RoomId}", producerId, roomId);
+            }
+        }
+
+        public async Task ResumeProducer(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            var producer = _mediaServer.GetProducer(roomId, connection.UserId.ToString());
+            
+            if (producer != null && producer.ProducerId == producerId)
+            {
+                producer.IsActive = true;
+
+                await Clients.Group(roomId).SendAsync("ProducerResumed", new
+                {
+                    userId = connection.UserId.ToString(),
+                    producerId = producerId,
+                    kind = producer.Kind
+                });
+
+                _logger.LogInformation("Producer {ProducerId} resumed in room {RoomId}", producerId, roomId);
+            }
+        }
+
+        public async Task CloseProducer(string roomId, string producerId)
+        {
+            var connectionId = Context.ConnectionId;
+
+            if (!_streamConnections.TryGetValue(connectionId, out var connection))
+                return;
+
+            _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
+
+            await Clients.Group(roomId).SendAsync("ProducerClosed", new
+            {
+                userId = connection.UserId.ToString(),
+                producerId = producerId
+            });
+
+            _logger.LogInformation("Producer {ProducerId} closed in room {RoomId}", producerId, roomId);
         }
 
         public async Task InviteCoHost(string roomId, string targetUsername, int targetUserId)
@@ -428,6 +748,7 @@ namespace wenu.Services
             if (targetConnection != null)
             {
                 targetConnection.Role = "viewer";
+                _mediaServer.RemoveProducer(roomId, targetConnection.UserId.ToString());
             }
 
             var message = new ChatMessage
@@ -487,6 +808,7 @@ namespace wenu.Services
             }
 
             connection.Role = "viewer";
+            _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
 
             var message = new ChatMessage
             {
@@ -540,6 +862,9 @@ namespace wenu.Services
                 room.Host.CoHosts.Remove(coHost);
             }
 
+            _mediaServer.RemoveProducer(roomId, connection.UserId.ToString());
+            _mediaServer.RemoveAllConsumersForUser(roomId, connection.UserId.ToString());
+
             await Groups.RemoveFromGroupAsync(connectionId, roomId);
 
             var leaveMessage = new ChatMessage
@@ -558,7 +883,6 @@ namespace wenu.Services
 
             room.MessageRoom.Messages.Add(leaveMessage);
 
-            // Send updated participant list to ALL remaining users in the room
             var updatedParticipantsList = room.Participants.UsersList.Select(p => new
             {
                 username = p.Username,
@@ -597,6 +921,8 @@ namespace wenu.Services
 
             room.State = "ended";
             room.EndTime = DateTime.UtcNow;
+
+            _mediaServer.RemoveRoom(roomId);
 
             await Clients.Group(roomId).SendAsync("StreamEnded", new
             {
@@ -849,8 +1175,6 @@ namespace wenu.Services
                 await Clients.Caller.SendAsync("Error", new { message = "Failed to notify participant joined" });
             }
         }
-
-
     }
 
     public class StreamRoom
@@ -983,5 +1307,4 @@ namespace wenu.Services
         public int? SdpMLineIndex { get; set; }
         public string UsernameFragment { get; set; } = string.Empty;
     }
-
 }

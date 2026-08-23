@@ -19,7 +19,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
-    options.MaximumReceiveMessageSize = 1024 * 1024 * 10; 
+    options.MaximumReceiveMessageSize = 1024 * 1024 * 10;
     options.StreamBufferCapacity = 100;
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
     options.HandshakeTimeout = TimeSpan.FromSeconds(15);
@@ -101,12 +101,14 @@ builder.Services.AddAuthentication(options =>
 builder.Services.Configure<FirewallSettings>(
     builder.Configuration.GetSection("FirewallSettings"));
 builder.Services.AddSingleton<AttackPatternDetector>();
+builder.Services.AddSingleton<MediaServer>();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
 
 builder.Services.AddMemoryCache(options =>
 {
-    options.SizeLimit = 1024 * 1024 * 512; 
+    options.SizeLimit = 1024 * 1024 * 512;
     options.CompactionPercentage = 0.25;
     options.ExpirationScanFrequency = TimeSpan.FromMinutes(5);
 });
@@ -127,6 +129,8 @@ app.UseCors("SignalRCors");
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
+    var db = services.GetRequiredService<AppDbContext>();
+    await db.Database.MigrateAsync();
     var roleManager = services.GetRequiredService<RoleManager<IdentityRole<int>>>();
     var roleSeeder = new RoleSeeder(roleManager);
     await roleSeeder.SeedRolesAsync();
