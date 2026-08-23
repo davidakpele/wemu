@@ -23,7 +23,7 @@ namespace wenu.Services
             var settings = _configuration.GetSection("EmailSettings");
 
             var host        = settings["Host"]        ?? throw new InvalidOperationException("EmailSettings:Host is missing");
-            var port        = int.Parse(settings["Port"] ?? "587");
+            var port        = int.Parse(settings["Port"] ?? "465");
             var senderName  = settings["SenderName"]  ?? "App";
             var senderEmail = settings["SenderEmail"] ?? throw new InvalidOperationException("EmailSettings:SenderEmail is missing");
             var appPassword = settings["AppPassword"] ?? throw new InvalidOperationException("EmailSettings:AppPassword is missing");
@@ -32,7 +32,7 @@ namespace wenu.Services
             message.From.Add(new MailboxAddress(senderName, senderEmail));
             // Deliver to the inbox owner (you), not back to the submitter
             message.To.Add(new MailboxAddress(senderName, senderEmail));
-            // Keep the submitter's address as Reply-To so you can reply directly
+            // Keep the submitter's address as Reply-To so you can reply directly to them
             message.ReplyTo.Add(new MailboxAddress(request.Name, request.Email));
             message.Subject = $"[{request.InquiryType}] New Inquiry from {request.Name}";
 
@@ -74,7 +74,9 @@ namespace wenu.Services
 
             try
             {
-                await client.ConnectAsync(host, port, SecureSocketOptions.Auto);
+                // Port 465 with SslOnConnect (implicit SSL) — works on Render and most cloud hosts.
+                // Port 587 with STARTTLS is blocked on Render's free tier and hangs indefinitely.
+                await client.ConnectAsync(host, port, SecureSocketOptions.SslOnConnect);
                 await client.AuthenticateAsync(senderEmail, appPassword);
                 await client.SendAsync(message);
                 _logger.LogInformation("Email sent to {Email} for inquiry type '{InquiryType}'", request.Email, request.InquiryType);

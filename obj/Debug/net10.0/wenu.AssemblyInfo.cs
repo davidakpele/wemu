@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("wenu")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fbe4aa420fd6c2b642f4017832db49656337e3cd")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3b998df20f7665dd952baf0a9ef0d60b8045f5a9")]
 [assembly: System.Reflection.AssemblyProductAttribute("wenu")]
 [assembly: System.Reflection.AssemblyTitleAttribute("wenu")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
