@@ -30,7 +30,10 @@ namespace wenu.Services
 
             var message = new MimeMessage();
             message.From.Add(new MailboxAddress(senderName, senderEmail));
-            message.To.Add(new MailboxAddress(request.Name, request.Email));
+            // Deliver to the inbox owner (you), not back to the submitter
+            message.To.Add(new MailboxAddress(senderName, senderEmail));
+            // Keep the submitter's address as Reply-To so you can reply directly
+            message.ReplyTo.Add(new MailboxAddress(request.Name, request.Email));
             message.Subject = $"[{request.InquiryType}] New Inquiry from {request.Name}";
 
             var body = new BodyBuilder
