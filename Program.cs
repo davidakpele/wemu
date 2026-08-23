@@ -1,18 +1,20 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Text.Json;
 using wenu.Services;
 using Scalar.AspNetCore;
 using wenu.Configs;
+using wenu.Entities;
 using wenu.Middleware;
 using wenu.Validators;
+using wenu.Enums;
 using FluentValidation;
 using FluentValidation.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
-
-// ─── SignalR ──────────────────────────────────────────────────────────────
 
 builder.Services.AddSignalR(options =>
 {
@@ -30,8 +32,6 @@ builder.Services.AddSignalR(options =>
     options.PayloadSerializerOptions.WriteIndented = false;
 });
 
-// ─── CORS ─────────────────────────────────────────────────────────────────
-
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("SignalRCors", policy =>
@@ -45,21 +45,17 @@ builder.Services.AddCors(options =>
     });
 });
 
-// ─── Controllers & Validation ─────────────────────────────────────────────
-
 builder.Services.AddControllers();
 builder.Services.AddFluentValidationAutoValidation();
 builder.Services.AddFluentValidationClientsideAdapters();
 builder.Services.AddValidatorsFromAssemblyContaining<RegisterUserValidator>();
 
-// ─── In-Memory User Store (replaces EF + Identity entirely) ──────────────
-//     Singleton so the same dictionary lives for the lifetime of the process.
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-builder.Services.AddSingleton<InMemoryUserStore>();
-builder.Services.AddSingleton<InMemoryDataStore>();
-builder.Services.AddSingleton<Microsoft.AspNetCore.Identity.IPasswordHasher<wenu.Entities.Users>, Microsoft.AspNetCore.Identity.PasswordHasher<wenu.Entities.Users>>();
-
-// ─── JWT Authentication ───────────────────────────────────────────────────
+builder.Services.AddIdentity<Users, IdentityRole<int>>()
+    .AddEntityFrameworkStores<AppDbContext>()
+    .AddDefaultTokenProviders();
 
 var jwtSettings = builder.Configuration.GetSection("JwtSettings");
 var secretKey = jwtSettings["SecretKey"]
@@ -102,17 +98,13 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
-// ─── Application services ────────────────────────────────────────────────
-
 builder.Services.Configure<FirewallSettings>(
     builder.Configuration.GetSection("FirewallSettings"));
-
 builder.Services.AddSingleton<AttackPatternDetector>();
 builder.Services.AddSingleton<MediaServer>();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
-
-// ─── Caching & Compression ────────────────────────────────────────────────
+builder.Services.AddScoped<IEmailService, EmailService>();
 
 builder.Services.AddMemoryCache(options =>
 {
@@ -126,18 +118,23 @@ builder.Services.AddResponseCompression(options =>
     options.EnableForHttps = true;
 });
 
-// ─── OpenAPI ──────────────────────────────────────────────────────────────
-
 builder.Services.AddOpenApi();
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PIPELINE
-// ═══════════════════════════════════════════════════════════════════════════
 
 var app = builder.Build();
 
 app.UseResponseCompression();
+
 app.UseCors("SignalRCors");
+
+using (var scope = app.Services.CreateScope())
+{
+    var services = scope.ServiceProvider;
+    var db = services.GetRequiredService<AppDbContext>();
+    await db.Database.MigrateAsync();
+    var roleManager = services.GetRequiredService<RoleManager<IdentityRole<int>>>();
+    var roleSeeder = new RoleSeeder(roleManager);
+    await roleSeeder.SeedRolesAsync();
+}
 
 app.UseMiddleware<ExceptionMiddleware>();
 
@@ -147,10 +144,7 @@ if (app.Environment.IsDevelopment())
     app.MapScalarApiReference();
 }
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseHttpsRedirection();
-}
+app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 

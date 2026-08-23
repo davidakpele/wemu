@@ -30,7 +30,8 @@
               "RelativeToolTip": "Services\\StreamingHub.cs",
               "ViewState": "AgIAABEFAAAAAAAAAAAuwEQFAAABAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
-              "WhenOpened": "2026-01-30T11:56:51.395Z"
+              "WhenOpened": "2026-01-30T11:56:51.395Z",
+              "EditorCaption": ""
             },
             {
               "$type": "Document",
@@ -40,7 +41,7 @@
               "RelativeDocumentMoniker": "Program.cs",
               "ToolTip": "E:\\Projects\\wenu\\Program.cs",
               "RelativeToolTip": "Program.cs",
-              "ViewState": "AgIAACsAAAAAAAAAAAAqwDkAAAAvAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAJYAAAAKAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2026-01-27T03:39:23.766Z",
               "EditorCaption": ""

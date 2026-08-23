@@ -1,5 +1,3 @@
-// src/Services/MediaServer.cs
-
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -116,7 +114,7 @@ namespace wenu.Services
     {
         public string UserId { get; set; }
         public string ProducerId { get; set; }
-        public string Kind { get; set; } 
+        public string Kind { get; set; } // "audio" or "video"
         public RTCSessionDescriptionInit Offer { get; set; }
         public DateTime CreatedAt { get; set; }
         public bool IsActive { get; set; }
