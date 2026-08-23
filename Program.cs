@@ -104,6 +104,7 @@ builder.Services.AddSingleton<AttackPatternDetector>();
 builder.Services.AddSingleton<MediaServer>();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
 
 builder.Services.AddMemoryCache(options =>
 {
@@ -128,6 +129,8 @@ app.UseCors("SignalRCors");
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
+    var db = services.GetRequiredService<AppDbContext>();
+    await db.Database.MigrateAsync();
     var roleManager = services.GetRequiredService<RoleManager<IdentityRole<int>>>();
     var roleSeeder = new RoleSeeder(roleManager);
     await roleSeeder.SeedRolesAsync();
