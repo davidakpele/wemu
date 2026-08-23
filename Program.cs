@@ -1,16 +1,16 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
+// using Microsoft.AspNetCore.Identity;        // DB disabled — no Identity
+// using Microsoft.EntityFrameworkCore;        // DB disabled — no EF Core
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Text.Json;
 using wenu.Services;
 using Scalar.AspNetCore;
 using wenu.Configs;
-using wenu.Entities;
+// using wenu.Entities;                        // DB disabled — no entity types needed at startup
 using wenu.Middleware;
 using wenu.Validators;
-using wenu.Enums;
+// using wenu.Enums;                           // DB disabled — RoleSeeder not used
 using FluentValidation;
 using FluentValidation.AspNetCore;
 
@@ -50,12 +50,13 @@ builder.Services.AddFluentValidationAutoValidation();
 builder.Services.AddFluentValidationClientsideAdapters();
 builder.Services.AddValidatorsFromAssemblyContaining<RegisterUserValidator>();
 
-builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+// DB disabled — AppDbContext + Identity not needed without a database
+// builder.Services.AddDbContext<AppDbContext>(options =>
+//     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-builder.Services.AddIdentity<Users, IdentityRole<int>>()
-    .AddEntityFrameworkStores<AppDbContext>()
-    .AddDefaultTokenProviders();
+// builder.Services.AddIdentity<Users, IdentityRole<int>>()
+//     .AddEntityFrameworkStores<AppDbContext>()
+//     .AddDefaultTokenProviders();
 
 var jwtSettings = builder.Configuration.GetSection("JwtSettings");
 var secretKey = jwtSettings["SecretKey"]
@@ -102,8 +103,9 @@ builder.Services.Configure<FirewallSettings>(
     builder.Configuration.GetSection("FirewallSettings"));
 builder.Services.AddSingleton<AttackPatternDetector>();
 builder.Services.AddSingleton<MediaServer>();
-builder.Services.AddScoped<JwtService>();
-builder.Services.AddScoped<IAuthService, AuthService>();
+// DB disabled — JwtService and AuthService depend on UserManager<Users> (Identity)
+// builder.Services.AddScoped<JwtService>();
+// builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
 builder.Services.AddMemoryCache(options =>
@@ -126,15 +128,16 @@ app.UseResponseCompression();
 
 app.UseCors("SignalRCors");
 
-using (var scope = app.Services.CreateScope())
-{
-    var services = scope.ServiceProvider;
-    var db = services.GetRequiredService<AppDbContext>();
-    await db.Database.MigrateAsync();
-    var roleManager = services.GetRequiredService<RoleManager<IdentityRole<int>>>();
-    var roleSeeder = new RoleSeeder(roleManager);
-    await roleSeeder.SeedRolesAsync();
-}
+// DB disabled — no database to migrate and no roles to seed
+// using (var scope = app.Services.CreateScope())
+// {
+//     var services = scope.ServiceProvider;
+//     var db = services.GetRequiredService<AppDbContext>();
+//     await db.Database.MigrateAsync();
+//     var roleManager = services.GetRequiredService<RoleManager<IdentityRole<int>>>();
+//     var roleSeeder = new RoleSeeder(roleManager);
+//     await roleSeeder.SeedRolesAsync();
+// }
 
 app.UseMiddleware<ExceptionMiddleware>();
 
